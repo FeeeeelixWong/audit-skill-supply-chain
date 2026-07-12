@@ -20,7 +20,7 @@ Rules for contributions:
 
 ```bash
 python3 tools/validate_skill.py
-python3 -m py_compile skills/audit-skill-supply-chain/scripts/scan_skill.py
+python3 -m py_compile skills/audit-skill-supply-chain/scripts/*.py
 ```
 
 ## 中文
@@ -43,5 +43,5 @@ python3 -m py_compile skills/audit-skill-supply-chain/scripts/scan_skill.py
 
 ```bash
 python3 tools/validate_skill.py
-python3 -m py_compile skills/audit-skill-supply-chain/scripts/scan_skill.py
+python3 -m py_compile skills/audit-skill-supply-chain/scripts/*.py
 ```

@@ -13,4 +13,5 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 tools/validate_skill.py
-      - run: python3 tools/package_release.py --version 0.1.0
+      - run: python3 skills/audit-skill-supply-chain/scripts/scan_installed_skills.py --path skills --fail-on critical
+      - run: python3 tools/package_release.py --version 0.2.0

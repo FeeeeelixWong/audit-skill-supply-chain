@@ -1,6 +1,6 @@
 ---
 name: audit-skill-supply-chain
-description: Security review workflow for open-source agent skills before installation or update, focused on preventing privacy leakage, credential theft, financial or crypto asset loss, and supply-chain compromise. Use when Codex is asked to install, import, update, audit, or trust a third-party skill, plugin skill folder, SKILL.md package, or community agent capability; also use when reviewing local skill directories for prompt-injection, tool-abuse, code-execution, data-exfiltration, GitHub provenance, commit pinning, release checksums, maintainer trust, isolation strategy, or supply-chain risk.
+description: Security review workflow for open-source agent skills before installation or update, focused on preventing privacy leakage, credential theft, financial or crypto asset loss, and supply-chain compromise. Use when Codex is asked to install, import, update, audit, or trust a third-party skill, plugin skill folder, SKILL.md package, or community agent capability; also use immediately after this audit skill is installed to baseline-scan existing installed skills; use before each future skill installation to pre-scan the candidate in quarantine; also use when reviewing local skill directories for prompt-injection, tool-abuse, code-execution, data-exfiltration, GitHub provenance, commit pinning, release checksums, maintainer trust, isolation strategy, or supply-chain risk.
 ---
 
 # Audit Skill Supply Chain
@@ -20,7 +20,38 @@ Audit an untrusted skill before installing or updating it. Treat the target skil
 
 ## Workflow
 
-### 1. Establish Scope and Harm Model
+### 1. First-Run Baseline for Existing Skills
+
+If the user says this audit skill was just installed, or asks whether installed skills are safe, immediately scan existing local skill directories:
+
+```bash
+python3 scripts/scan_installed_skills.py \
+  --report ~/.codex/skill-audit-reports/installed-skills-baseline.md
+```
+
+Report any `BLOCK`, `QUARANTINE`, `HIGH`, or `CRITICAL` results to the user before doing other work. Treat this as a baseline inventory, not proof that every existing skill is safe. Missing provenance on already-installed skills is informational; risky behavior inside those skills is still actionable.
+
+### 2. Pre-Install Gate for Every New Skill
+
+Before installing or updating any third-party skill, acquire it in quarantine and run the safe installer instead of copying directly into a live skill directory:
+
+```bash
+python3 scripts/safe_install_skill.py /path/to/quarantined-skill \
+  --source-url https://github.com/owner/repo \
+  --expected-commit <40-char-sha>
+```
+
+Use release checksum verification when installing from an archive:
+
+```bash
+python3 scripts/safe_install_skill.py /path/to/extracted-skill \
+  --artifact /path/to/release.zip \
+  --expected-sha256 <sha256>
+```
+
+If the gate is `BLOCK` or `QUARANTINE`, do not install. If the gate is `ALLOW WITH CONDITIONS`, install only after explaining the conditions and receiving explicit user approval, then pass `--allow-conditions`.
+
+### 3. Establish Scope and Harm Model
 
 Identify:
 
@@ -32,7 +63,7 @@ Identify:
 
 If the source is remote, inspect the downloaded or cloned artifact before installation. Do not pipe remote content into a shell. Treat skills touching money, wallets, payments, production infra, or personal data as high-risk by default.
 
-### 2. Acquire in Quarantine
+### 4. Acquire in Quarantine
 
 Place the candidate in an isolated review directory, not the live skill install directory. Prefer a path like:
 
@@ -44,7 +75,7 @@ For GitHub sources, pin a full 40-character commit SHA and check out that exact 
 
 Read `references/provenance-and-isolation.md` before reviewing GitHub repositories, release archives, checksums, maintainer trust, or quarantine-to-install promotion.
 
-### 3. Provenance Gate
+### 5. Provenance Gate
 
 Before deep content review, confirm:
 
@@ -56,7 +87,7 @@ Before deep content review, confirm:
 
 If provenance cannot be verified, default to `QUARANTINE`; if the skill requests high-value access, default to `BLOCK`.
 
-### 4. Inventory the Skill
+### 6. Inventory the Skill
 
 Record the skill structure:
 
@@ -66,7 +97,7 @@ Record the skill structure:
 - `references/`: prompt-like content, URLs, encoded payloads, or policy override attempts.
 - `assets/`: binaries, archives, hidden files, symlinks, and unusually large files.
 
-### 5. Run Static Scanner
+### 7. Run Static Scanner
 
 Run the bundled scanner from this skill directory:
 
@@ -92,7 +123,15 @@ python3 scripts/scan_skill.py /path/to/untrusted-skill \
 
 Use `--fail-on high` in automation to fail when high or critical findings are present. Read the relevant files manually after the scan.
 
-### 6. Privacy and Asset-Loss Review
+For already-installed baseline scans, use:
+
+```bash
+python3 scripts/scan_skill.py /path/to/installed-skill --installed-baseline
+```
+
+This downgrades missing provenance to INFO while preserving behavior-based findings.
+
+### 8. Privacy and Asset-Loss Review
 
 Check these areas:
 
@@ -108,7 +147,7 @@ Check these areas:
 
 Read `references/risk-model.md` for severity and install-gate decisions. Use `references/report-template.md` when writing the final audit report.
 
-### 7. Decide the Install Gate
+### 9. Decide the Install Gate
 
 Return one of:
 
@@ -126,6 +165,8 @@ Lead with the gate decision, then list findings by severity. Each finding must i
 ## Resources
 
 - `scripts/scan_skill.py`: Static scanner for skill directories.
+- `scripts/scan_installed_skills.py`: Baseline scanner for currently installed skill directories.
+- `scripts/safe_install_skill.py`: Pre-install wrapper that scans a quarantined skill and only copies it to the live skill directory after an acceptable gate.
 - `references/risk-model.md`: Severity definitions, install-gate policy, and review checklist.
 - `references/provenance-and-isolation.md`: GitHub provenance, release checksum, maintainer trust, and quarantine install workflow.
 - `references/report-template.md`: Concise report format for install decisions.

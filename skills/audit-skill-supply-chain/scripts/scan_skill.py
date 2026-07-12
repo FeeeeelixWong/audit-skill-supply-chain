@@ -463,6 +463,7 @@ def scan_provenance(root: Path, args: argparse.Namespace, findings: list[Finding
     expected_commit = args.expected_commit.strip().lower() if args.expected_commit else None
     expected_sha = args.expected_sha256.strip().lower() if args.expected_sha256 else None
     integrity_verified = False
+    installed_baseline = bool(getattr(args, "installed_baseline", False))
 
     if args.source_url and not source_slug:
         add_provenance_finding(
@@ -603,6 +604,15 @@ def scan_provenance(root: Path, args: argparse.Namespace, findings: list[Finding
                 "Verify the release checksum or scan a checkout pinned to a full commit SHA.",
             )
         elif not integrity_verified:
+            if installed_baseline:
+                add_provenance_finding(
+                    findings,
+                    "INFO",
+                    "No provenance evidence supplied for installed baseline scan",
+                    "no .git directory, source URL, approved commit, or verified checksum",
+                    "Record source metadata during the next update or reinstall through the safe installer.",
+                )
+                return
             add_provenance_finding(
                 findings,
                 "MEDIUM",
@@ -780,16 +790,20 @@ def summarize(findings: list[Finding]) -> dict[str, int]:
     return counts
 
 
+def gate_for_findings(findings: list[Finding]) -> str:
+    highest = max((SEVERITY_ORDER[f.severity] for f in findings), default=0)
+    if highest >= SEVERITY_ORDER["HIGH"]:
+        return "BLOCK"
+    if highest == SEVERITY_ORDER["MEDIUM"]:
+        return "QUARANTINE"
+    if highest == SEVERITY_ORDER["LOW"]:
+        return "ALLOW WITH CONDITIONS"
+    return "ALLOW"
+
+
 def print_text_report(root: Path, findings: list[Finding]) -> None:
     counts = summarize(findings)
-    highest = max((SEVERITY_ORDER[f.severity] for f in findings), default=0)
-    gate = "ALLOW"
-    if highest >= SEVERITY_ORDER["HIGH"]:
-        gate = "BLOCK"
-    elif highest == SEVERITY_ORDER["MEDIUM"]:
-        gate = "QUARANTINE"
-    elif highest == SEVERITY_ORDER["LOW"]:
-        gate = "ALLOW WITH CONDITIONS"
+    gate = gate_for_findings(findings)
 
     print(f"Target: {root}")
     print(f"Gate: {gate}")
@@ -820,6 +834,11 @@ def main() -> int:
     parser.add_argument("--artifact", help="Downloaded release archive or asset to hash before extraction/install")
     parser.add_argument("--expected-sha256", help="Expected SHA256 for --artifact, or tree digest when no artifact is provided")
     parser.add_argument(
+        "--installed-baseline",
+        action="store_true",
+        help="Downgrade missing provenance to INFO for already-installed skill inventory scans",
+    )
+    parser.add_argument(
         "--fail-on",
         choices=["info", "low", "medium", "high", "critical"],
         help="Exit with status 2 when this severity or higher is present",
@@ -841,6 +860,7 @@ def main() -> int:
             json.dumps(
                 {
                     "target": str(root),
+                    "gate": gate_for_findings(findings),
                     "summary": summarize(findings),
                     "findings": [asdict(finding) for finding in findings],
                 },

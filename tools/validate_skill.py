@@ -54,12 +54,15 @@ def main() -> int:
         SKILL / "references" / "provenance-and-isolation.md",
         SKILL / "references" / "report-template.md",
         SKILL / "scripts" / "scan_skill.py",
+        SKILL / "scripts" / "scan_installed_skills.py",
+        SKILL / "scripts" / "safe_install_skill.py",
     ]
     for path in required:
         if not path.exists():
             fail(f"missing {path.relative_to(ROOT)}")
 
-    py_compile.compile(str(SKILL / "scripts" / "scan_skill.py"), doraise=True)
+    for script in sorted((SKILL / "scripts").glob("*.py")):
+        py_compile.compile(str(script), doraise=True)
     print("Skill package is valid.")
     return 0
 
