@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill Supply Chain Auditor"
+  short_description: "Pre-install skill provenance and safety audit"
+  default_prompt: "Use $audit-skill-supply-chain to review this open-source skill's provenance, privacy risk, asset-loss risk, and install safety before installing it."
