@@ -21,6 +21,8 @@ Rules for contributions:
 ```bash
 python3 tools/validate_skill.py
 python3 -m py_compile skills/audit-skill-supply-chain/scripts/*.py
+python3 tools/install_skill.py --target all --dry-run
+python3 tools/create_cli_adapter.py --target all --dry-run
 ```
 
 ## 中文
@@ -44,4 +46,6 @@ python3 -m py_compile skills/audit-skill-supply-chain/scripts/*.py
 ```bash
 python3 tools/validate_skill.py
 python3 -m py_compile skills/audit-skill-supply-chain/scripts/*.py
+python3 tools/install_skill.py --target all --dry-run
+python3 tools/create_cli_adapter.py --target all --dry-run
 ```

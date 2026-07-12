@@ -19,6 +19,10 @@ import scan_skill  # noqa: E402
 
 
 BLOCKING_GATES = {"BLOCK", "QUARANTINE"}
+CLI_DEST_ROOTS = {
+    "codex": Path.home() / ".codex" / "skills",
+    "claude": Path.home() / ".claude" / "skills",
+}
 
 
 def parse_skill_name(skill_md: Path) -> str:
@@ -66,10 +70,24 @@ def copy_skill(candidate: Path, destination: Path, replace: bool) -> None:
     shutil.copytree(candidate, destination, symlinks=True, ignore=ignore)
 
 
+def destination_roots(cli: str, dest_root: str | None) -> list[Path]:
+    if dest_root:
+        return [Path(dest_root).expanduser().resolve()]
+    if cli == "both":
+        return [CLI_DEST_ROOTS["codex"].resolve(), CLI_DEST_ROOTS["claude"].resolve()]
+    return [CLI_DEST_ROOTS[cli].resolve()]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Safely install a skill after pre-install audit.")
     parser.add_argument("candidate", help="Candidate skill directory already acquired in quarantine")
-    parser.add_argument("--dest-root", default=str(Path.home() / ".codex" / "skills"), help="Live skill root")
+    parser.add_argument(
+        "--cli",
+        choices=["codex", "claude", "both"],
+        default="codex",
+        help="Live agent CLI skill root to install into when --dest-root is not set",
+    )
+    parser.add_argument("--dest-root", help="Custom live skill root")
     parser.add_argument("--source-url", help="Approved GitHub repository URL")
     parser.add_argument("--expected-commit", help="Approved full 40-character Git commit SHA")
     parser.add_argument("--artifact", help="Downloaded release archive or asset used to create the candidate")
@@ -107,19 +125,22 @@ def main() -> int:
         print("Install requires --allow-conditions after manual review.")
         return 2
 
-    destination = Path(args.dest_root).expanduser().resolve() / skill_name
+    destinations = [root / skill_name for root in destination_roots(args.cli, args.dest_root)]
     if args.dry_run:
-        print(f"Dry run: would install {args.candidate} -> {destination}")
+        for destination in destinations:
+            print(f"Dry run: would install {args.candidate} -> {destination}")
         return 0
 
     try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        copy_skill(args.candidate, destination, args.replace)
+        for destination in destinations:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            copy_skill(args.candidate, destination, args.replace)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Installed: {destination}")
+    for destination in destinations:
+        print(f"Installed: {destination}")
     return 0
 
 

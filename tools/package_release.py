@@ -26,7 +26,7 @@ def sha256_file(path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Package the audit-skill-supply-chain skill.")
-    parser.add_argument("--version", default="0.2.0", help="Release version without leading v")
+    parser.add_argument("--version", default="0.3.0", help="Release version without leading v")
     args = parser.parse_args()
 
     if not SKILL_DIR.exists():

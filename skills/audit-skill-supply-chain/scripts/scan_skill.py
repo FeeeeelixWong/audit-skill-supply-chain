@@ -235,6 +235,7 @@ def is_guidance_line(path: Path, line: str) -> bool:
             "risk",
             "such as",
             "state whether",
+            "target cli",
             "verify ",
             "whether ",
             "without explicit",

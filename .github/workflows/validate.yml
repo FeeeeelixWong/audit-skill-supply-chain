@@ -13,5 +13,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 tools/validate_skill.py
+      - run: python3 tools/install_skill.py --target all --dry-run
+      - run: python3 tools/create_cli_adapter.py --target all --dry-run
       - run: python3 skills/audit-skill-supply-chain/scripts/scan_installed_skills.py --path skills --fail-on critical
-      - run: python3 tools/package_release.py --version 0.2.0
+      - run: python3 tools/package_release.py --version 0.3.0
