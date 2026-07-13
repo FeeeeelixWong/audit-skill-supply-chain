@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -16,4 +19,5 @@ jobs:
       - run: python3 tools/install_skill.py --target all --dry-run
       - run: python3 tools/create_cli_adapter.py --target all --dry-run
       - run: python3 skills/audit-skill-supply-chain/scripts/scan_installed_skills.py --path skills --fail-on critical
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'
       - run: python3 tools/package_release.py --version 0.3.0
