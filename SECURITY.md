@@ -8,7 +8,7 @@ Do not include secrets, private keys, seed phrases, production tokens, customer 
 
 Preferred reporting path:
 
-1. Open a private GitHub Security Advisory if available.
+1. Open a [private GitHub Security Advisory](https://github.com/FeeeeelixWong/audit-skill-supply-chain/security/advisories/new).
 2. If private advisories are unavailable, open a minimal public issue that says a security report is needed, without sensitive details.
 3. Include affected version, scanner output, reproduction steps using safe fixtures, and expected behavior.
 
@@ -26,7 +26,7 @@ Security-sensitive examples:
 
 推荐报告方式：
 
-1. 如果可用，创建 GitHub 私有 Security Advisory。
+1. 创建 [GitHub 私有 Security Advisory](https://github.com/FeeeeelixWong/audit-skill-supply-chain/security/advisories/new)。
 2. 如果没有私有 advisory，只创建一个最小公开 issue，说明需要提交安全报告，不放敏感细节。
 3. 请包含受影响版本、扫描器输出、使用安全 fixture 的复现步骤，以及期望行为。
 

@@ -323,11 +323,22 @@ def parse_github_ref(value: str | None) -> tuple[str | None, str | None]:
     if scp_match:
         return f"{scp_match.group(1)}/{scp_match.group(2)}".lower(), None
 
-    if raw.startswith("github.com/"):
-        raw = "https://" + raw
-
-    parsed = urlparse(raw)
-    if parsed.netloc.lower() != "github.com":
+    normalized = raw if "://" in raw else f"https://{raw}"
+    parsed = urlparse(normalized)
+    try:
+        port = parsed.port
+    except ValueError:
+        return None, None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.hostname.lower() != "github.com"
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
         return None, None
 
     parts = [part for part in parsed.path.split("/") if part]
