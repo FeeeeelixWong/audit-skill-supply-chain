@@ -339,7 +339,7 @@ python3 tools/create_cli_adapter.py --project /path/to/project --target all
 
 本仓库围绕 PR 和持续的仓库安全检查叠加了几层彼此独立的检查：
 
-- **CodeRabbit**：仓库所有者审阅 GitHub App 请求的权限并显式授权后，自动审查每个非草稿 PR。仓库配置会对扫描器、安装器、CI workflow，以及隐私/财产敏感指引进行额外审查。
+- **CodeRabbit**：仓库所有者审阅 GitHub App 请求的权限并显式授权后，自动审查每个非草稿 PR。仓库配置会对扫描器、安装器、CI workflow，以及隐私/资产敏感指引进行额外审查。
 - **CodeQL**：在 PR、推送到 `main` 和每周定时扫描 Python 与 GitHub Actions 代码。
 - **Dependency Review**：当 PR 引入中等及以上严重度的漏洞依赖时失败，并为新增依赖提供许可证和 OpenSSF Scorecard 信息。
 - **Dependabot**：每周为 GitHub Actions 依赖创建更新 PR。
