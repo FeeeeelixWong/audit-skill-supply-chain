@@ -163,6 +163,19 @@ This project is a defensive review tool. It does not prove a skill is safe. It r
 - `ALLOW WITH CONDITIONS`: low-risk issues remain and must be constrained.
 - `ALLOW`: no material issue found in the reviewed artifact.
 
+## Automated Repository Review
+
+This repository layers several independent checks around pull requests and ongoing repository security checks:
+
+- **CodeRabbit** reviews each non-draft pull request after a repository owner has reviewed the requested GitHub App permissions and explicitly authorized it. Its repository configuration gives extra scrutiny to scanners, installers, CI workflows, and privacy- or asset-sensitive guidance.
+- **CodeQL** scans Python and GitHub Actions code on pull requests, pushes to `main`, and weekly.
+- **Dependency Review** fails a pull request that introduces a moderate-or-higher vulnerable dependency, and reports license or OpenSSF Scorecard information for new dependencies.
+- **Dependabot** opens weekly pull requests for GitHub Actions updates.
+- **OpenSSF Scorecard** evaluates repository-level supply-chain practices weekly and uploads findings to GitHub code scanning.
+- **zizmor** reviews GitHub Actions definitions with a security-focused static analysis and uploads high-confidence findings to GitHub code scanning.
+
+These services provide review evidence, not a safety guarantee and not an automatic merge decision. CodeRabbit requires third-party GitHub App permissions for code, commit statuses, issues, and pull requests; a repository owner must review those permissions and explicitly approve the installation. Then choose **Only select repositories** and select this repository only. See the [CodeRabbit GitHub integration guide](https://docs.coderabbit.ai/platforms/github-com).
+
 ## 中文
 
 一个用于 Codex、Claude Code 及兼容 CLI skill 目录的开源 agent skill 安装前安全审查闸门。
@@ -321,6 +334,19 @@ python3 tools/create_cli_adapter.py --project /path/to/project --target all
 - `QUARANTINE`：来源或行为无法验证。
 - `ALLOW WITH CONDITIONS`：仍有低风险问题，需要约束后安装。
 - `ALLOW`：已审查产物中未发现实质风险。
+
+## 仓库自动审查
+
+本仓库围绕 PR 和持续的仓库安全检查叠加了几层彼此独立的检查：
+
+- **CodeRabbit**：仓库所有者审阅 GitHub App 请求的权限并显式授权后，自动审查每个非草稿 PR。仓库配置会对扫描器、安装器、CI workflow，以及隐私/资产敏感指引进行额外审查。
+- **CodeQL**：在 PR、推送到 `main` 和每周定时扫描 Python 与 GitHub Actions 代码。
+- **Dependency Review**：当 PR 引入中等及以上严重度的漏洞依赖时失败，并为新增依赖提供许可证和 OpenSSF Scorecard 信息。
+- **Dependabot**：每周为 GitHub Actions 依赖创建更新 PR。
+- **OpenSSF Scorecard**：每周评估仓库层面的供应链安全实践，并把发现上传至 GitHub code scanning。
+- **zizmor**：以安全导向的静态分析检查 GitHub Actions 定义，并把高可信度发现上传到 GitHub code scanning。
+
+这些服务提供审查证据，不是安全保证，也不会自动合并。CodeRabbit 需要第三方 GitHub App 对代码、提交状态、Issue 和 PR 的权限；仓库所有者必须先审阅这些权限并显式批准安装。随后请选择 **Only select repositories**，并且只授权当前仓库。接入步骤见 [CodeRabbit GitHub 集成指南](https://docs.coderabbit.ai/platforms/github-com)。
 
 ## License
 
