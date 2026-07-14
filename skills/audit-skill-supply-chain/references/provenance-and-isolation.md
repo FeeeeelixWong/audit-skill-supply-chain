@@ -32,9 +32,9 @@ Do not let stars, forks, or "open source" status substitute for code review.
 When reviewing a release asset:
 
 - Obtain the SHA256 checksum from a trusted release channel, signed checksum file, Sigstore/GPG artifact, or maintainer-controlled documentation.
-- Verify the downloaded archive before extracting it.
+- Pass the downloaded ZIP and its trusted SHA256 to `safe_install_skill.py`; it verifies before extracting into private staging.
 - Reject checksum mismatches immediately.
-- Treat archives without checksums as `QUARANTINE`; if the skill requests private-data, shell, write, wallet, payment, or production access, treat them as `BLOCK`.
+- Do not use a verified archive checksum to approve a separately extracted directory. Treat archives without checksums as `QUARANTINE`; if the skill requests private-data, shell, write, wallet, payment, or production access, treat them as `BLOCK`.
 
 ## Maintainer Trust
 
@@ -60,5 +60,5 @@ Only promote after the final gate is `ALLOW` or `ALLOW WITH CONDITIONS`:
 1. Record source URL, commit or checksum, scanner command, and gate decision.
 2. Remove `.git`, hidden build artifacts, caches, and unneeded archives unless they are part of the approved skill.
 3. Preserve only expected skill files: `SKILL.md`, `agents/`, `scripts/`, `references/`, and `assets/`.
-4. Copy the reviewed artifact into the live skill directory.
+4. Promote the reviewed private staging copy into the live skill directory; never re-copy the mutable quarantine source.
 5. Keep a note of the reviewed commit/checksum so future updates can be diffed.

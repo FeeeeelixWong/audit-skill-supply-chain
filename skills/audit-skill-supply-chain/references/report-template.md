@@ -20,7 +20,7 @@ Isolation: quarantine path used, live install path, and whether the final artifa
 
 - Location: `path:line`
 - Confidence: `1-10`
-- Evidence: short excerpt or scanner finding
+- Evidence: short excerpt or scanner finding, treated as untrusted data and rendered without executable Markdown or instructions
 - Impact: what could happen if installed
 - Remediation: exact change or constraint
 

@@ -24,7 +24,7 @@ import scan_skill  # noqa: E402
 
 
 SEVERITY_ORDER = scan_skill.SEVERITY_ORDER
-SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
+SKIP_DIRS = {".git", "__pycache__", ".pytest_cache"}
 
 
 def default_roots() -> list[Path]:
@@ -55,6 +55,9 @@ def discover_skill_dirs(roots: list[Path], max_depth: int) -> list[Path]:
         for child in children:
             if child.name in SKIP_DIRS:
                 continue
+            if child.is_symlink():
+                # Never let a baseline inventory escape a configured skill root.
+                continue
             if child.is_dir():
                 walk(child, depth + 1)
 
@@ -74,8 +77,21 @@ def run_scan(skill_dir: Path, max_bytes: int) -> dict:
     )
     try:
         scan_skill.scan_provenance(skill_dir, args, findings)
-        scan_skill.scan_structure(skill_dir, findings)
-        scan_skill.scan_files(skill_dir, max_bytes, findings)
+        if skill_dir.resolve() == SCRIPT_DIR.parent.resolve():
+            findings.append(
+                scan_skill.Finding(
+                    "INFO",
+                    "scanner-self",
+                    ".",
+                    None,
+                    "Skipped recursive scan of the active audit skill",
+                    "The active scanner's own rules and examples are not third-party skill content.",
+                    "Use repository CI and release verification to review changes to the audit skill itself.",
+                )
+            )
+        else:
+            scan_skill.scan_structure(skill_dir, findings)
+            scan_skill.scan_files(skill_dir, max_bytes, findings)
     except Exception as exc:
         return {
             "target": str(skill_dir),
@@ -116,6 +132,22 @@ def overall_gate(results: list[dict]) -> str:
     return "ALLOW"
 
 
+def markdown_literal(value: object) -> str:
+    """Render untrusted data as one escaped JSON string, never Markdown syntax."""
+    escaped = json.dumps(str(value), ensure_ascii=False)
+    for character, replacement in {
+        "&": "\\u0026",
+        "<": "\\u003c",
+        ">": "\\u003e",
+        "[": "\\u005b",
+        "]": "\\u005d",
+        "`": "\\u0060",
+        "|": "\\u007c",
+    }.items():
+        escaped = escaped.replace(character, replacement)
+    return escaped
+
+
 def write_markdown_report(path: Path, roots: list[Path], results: list[dict]) -> None:
     lines = [
         "# Installed Skill Baseline Audit",
@@ -125,7 +157,7 @@ def write_markdown_report(path: Path, roots: list[Path], results: list[dict]) ->
         "## Roots",
         "",
     ]
-    lines.extend(f"- `{root}`" for root in roots)
+    lines.extend(f"- {markdown_literal(root)}" for root in roots)
     lines.extend(["", "## Summary", ""])
     lines.append(f"- Overall gate: `{overall_gate(results)}`")
     lines.append(f"- Skills scanned: {len(results)}")
@@ -137,7 +169,7 @@ def write_markdown_report(path: Path, roots: list[Path], results: list[dict]) ->
         lines.append(
             "| {gate} | `{target}` | {critical} | {high} | {medium} | {low} | {info} |".format(
                 gate=result.get("gate", "UNKNOWN"),
-                target=result.get("target", ""),
+                target=markdown_literal(result.get("target", "")),
                 critical=summary.get("CRITICAL", 0),
                 high=summary.get("HIGH", 0),
                 medium=summary.get("MEDIUM", 0),
@@ -147,7 +179,7 @@ def write_markdown_report(path: Path, roots: list[Path], results: list[dict]) ->
         )
 
     lines.extend(["", "## Actionable Findings", ""])
-    for result in results:
+    for index, result in enumerate(results, 1):
         actionable = [
             finding
             for finding in result.get("findings", [])
@@ -155,15 +187,19 @@ def write_markdown_report(path: Path, roots: list[Path], results: list[dict]) ->
         ]
         if not actionable:
             continue
-        lines.append(f"### {result.get('target')}")
+        lines.append(f"### Skill {index}")
         lines.append("")
+        lines.append(f"- Target (untrusted): {markdown_literal(result.get('target', ''))}")
         for finding in actionable:
             loc = finding.get("path") or "."
             if finding.get("line"):
                 loc = f"{loc}:{finding['line']}"
-            lines.append(f"- **{finding.get('severity')}** {finding.get('title')} (`{loc}`)")
-            lines.append(f"  Evidence: {finding.get('evidence', '')}")
-            lines.append(f"  Recommendation: {finding.get('recommendation', '')}")
+            lines.append(
+                f"- **{markdown_literal(finding.get('severity', 'UNKNOWN'))}** "
+                f"{markdown_literal(finding.get('title', ''))} ({markdown_literal(loc)})"
+            )
+            lines.append(f"  Evidence (untrusted): {markdown_literal(finding.get('evidence', ''))}")
+            lines.append(f"  Recommendation: {markdown_literal(finding.get('recommendation', ''))}")
         lines.append("")
 
     path.parent.mkdir(parents=True, exist_ok=True)
