@@ -42,10 +42,10 @@ python3 scripts/safe_install_skill.py /path/to/quarantined-skill \
   --expected-commit <40-char-sha>
 ```
 
-Use release checksum verification when installing from an archive:
+Use release checksum verification by passing the ZIP directly to the safe installer. It extracts into private staging, audits the extracted root, and promotes only that exact staged directory:
 
 ```bash
-python3 scripts/safe_install_skill.py /path/to/extracted-skill \
+python3 scripts/safe_install_skill.py \
   --cli claude \
   --artifact /path/to/release.zip \
   --expected-sha256 <sha256>
@@ -74,7 +74,7 @@ Place the candidate in an isolated review directory, not the live skill install 
 mkdir -p ~/.codex/skill-quarantine
 ```
 
-For GitHub sources, pin a full 40-character commit SHA and check out that exact commit in quarantine. For release archives, verify the release asset checksum before extraction. Never install from a moving branch, unverified tag, or mutable download URL unless the final gate is `QUARANTINE` or `BLOCK`.
+For GitHub sources, pin a full 40-character commit SHA and check out that exact commit in quarantine. For release archives, obtain a trusted checksum and pass the ZIP to `safe_install_skill.py`; it verifies before privately extracting. Never install from a moving branch, unverified tag, or mutable download URL unless the final gate is `QUARANTINE` or `BLOCK`.
 
 Read `references/provenance-and-isolation.md` before reviewing GitHub repositories, release archives, checksums, maintainer trust, or quarantine-to-install promotion.
 
@@ -159,7 +159,7 @@ Return one of:
 - `ALLOW WITH CONDITIONS`: low risk issues remain; list required constraints, pinning, or monitoring.
 - `ALLOW`: no material issues found; still report provenance, scope, and residual risk.
 
-Only promote from quarantine to the live skill directory after the final gate is `ALLOW` or `ALLOW WITH CONDITIONS`, and only copy the exact reviewed artifact.
+Only promote from quarantine to the live skill directory after the final gate is `ALLOW` or `ALLOW WITH CONDITIONS`, and only promote the exact private staging copy that was reviewed. Do not treat a separately supplied archive checksum as evidence for an unrelated extracted directory.
 
 ## Output
 

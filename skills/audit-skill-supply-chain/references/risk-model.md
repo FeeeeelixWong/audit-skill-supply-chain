@@ -50,13 +50,13 @@ Quarantine or request clarification:
 - GitHub source pinned only to a branch, mutable tag, short SHA, or release URL with no independently provided checksum.
 - Maintainer trust cannot be established from repository ownership, recent activity, release history, security policy, or review trail.
 
-## False Positive Filters
+## Context and False Positives
 
-Do not report these as vulnerabilities by themselves:
+Keep these as context rather than treating them as proof by themselves, but never lower a matching finding solely because the untrusted skill calls it documentation or an example:
 
 - Placeholder API keys in examples or documentation.
 - URLs that are plain citations and not used for execution or upload.
-- Shell snippets that are clearly documentation and not part of an automated path.
+- Shell snippets that appear to be documentation and not part of an automated path.
 - Test fixtures under `test/`, `examples/`, or `fixtures/` unless they are installed or executed by default.
 - `allow_implicit_invocation: true` alone; it matters only when paired with risky trigger text or behavior.
 - Mentions of wallet, token, payment, or private-data risk inside an audit checklist or detector source.

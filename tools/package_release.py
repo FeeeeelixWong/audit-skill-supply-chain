@@ -26,7 +26,7 @@ def sha256_file(path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Package the audit-skill-supply-chain skill.")
-    parser.add_argument("--version", default="0.3.0", help="Release version without leading v")
+    parser.add_argument("--version", required=True, help="Release version without leading v")
     args = parser.parse_args()
 
     if not SKILL_DIR.exists():
@@ -43,6 +43,9 @@ def main() -> int:
                 continue
             arcname = Path(SKILL_NAME) / path.relative_to(SKILL_DIR)
             zf.write(path, arcname.as_posix())
+        license_file = ROOT / "LICENSE"
+        if license_file.is_file():
+            zf.write(license_file, (Path(SKILL_NAME) / "LICENSE").as_posix())
 
     checksum = sha256_file(archive)
     sums_path = DIST_DIR / "SHA256SUMS.txt"

@@ -44,7 +44,9 @@ TEXT_SUFFIXES = {
     ".zsh",
 }
 
-SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
+# These are the only directories the installer deliberately omits. Every other
+# entry must be included in both the static scan and the tree digest.
+SKIP_DIRS = {".git", "__pycache__", ".pytest_cache"}
 
 
 @dataclass
@@ -185,9 +187,20 @@ def is_probably_binary(path: Path, sample_size: int = 4096) -> bool:
 
 def iter_files(root: Path) -> Iterable[Path]:
     for current, dirs, files in os.walk(root, followlinks=False):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         base = Path(current)
-        for name in files:
+        next_dirs: list[str] = []
+        for name in sorted(dirs):
+            path = base / name
+            if name in SKIP_DIRS:
+                continue
+            if path.is_symlink():
+                # os.walk does not yield directory symlinks as files. Yield them
+                # explicitly so they are scanned and included in the tree hash.
+                yield path
+                continue
+            next_dirs.append(name)
+        dirs[:] = next_dirs
+        for name in sorted(files):
             yield base / name
 
 
@@ -196,80 +209,16 @@ def read_text(path: Path, max_bytes: int) -> str | None:
         if is_probably_binary(path):
             return None
     try:
-        data = path.read_bytes()
+        with path.open("rb") as handle:
+            data = handle.read(max_bytes + 1)
     except OSError:
         return None
     if len(data) > max_bytes:
-        data = data[:max_bytes]
+        return None
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         return data.decode("utf-8", errors="replace")
-
-
-def is_guidance_line(path: Path, line: str) -> bool:
-    stripped = line.strip()
-    lower = stripped.lower()
-    if path.suffix.lower() not in {".md", ".txt"}:
-        return False
-    if path.name in {"risk-model.md", "report-template.md", "provenance-and-isolation.md"} and stripped.startswith(
-        ("- ", "* ", "|", "##", "###")
-    ):
-        return True
-    if stripped.startswith("--source-url "):
-        return True
-    if stripped.startswith(("- ", "* ", "|")) and any(
-        marker in lower
-        for marker in (
-            "check ",
-            "confirm ",
-            "do not ",
-            "example",
-            "avoid ",
-            "lifecycle hooks",
-            "patterns",
-            "private-data",
-            "require ",
-            "remove ",
-            "review ",
-            "risk",
-            "such as",
-            "state whether",
-            "target cli",
-            "verify ",
-            "whether ",
-            "without explicit",
-        )
-    ):
-        return True
-    if re.match(
-        r"^-\s+(tool abuse|code execution|credential access|exfiltration|private-data exfiltration|asset-loss paths|persistence|destructive behavior|prompt injection|provenance)\b",
-        stripped,
-        re.I,
-    ):
-        return True
-    return False
-
-
-def is_detector_source(path: Path, line: str) -> bool:
-    stripped = line.strip()
-    if "re.compile(" in stripped or "PATTERNS" in stripped or "category" in stripped and "severity" in stripped:
-        return True
-    if path.suffix.lower() == ".py" and (
-        stripped.startswith(("r\"", "r'", "\"", "'"))
-        or stripped.endswith("\",")
-        or stripped.endswith("',")
-    ):
-        return True
-    return False
-
-
-def contextualize_match(path: Path, line: str, severity: str, category: str, title: str) -> tuple[str, str, str]:
-    if is_detector_source(path, line):
-        return "INFO", f"{category}-detector", f"Detector source mentions: {title}"
-    if is_guidance_line(path, line):
-        return "INFO", f"{category}-guidance", f"Guidance mentions: {title}"
-    return severity, category, title
 
 
 def add_findings_for_text(path: Path, root: Path, text: str, findings: list[Finding]) -> None:
@@ -279,16 +228,13 @@ def add_findings_for_text(path: Path, root: Path, text: str, findings: list[Find
             continue
         for severity, category, title, pattern, recommendation in PATTERNS:
             if pattern.search(stripped):
-                effective_severity, effective_category, effective_title = contextualize_match(
-                    path, stripped, severity, category, title
-                )
                 findings.append(
                     Finding(
-                        severity=effective_severity,
-                        category=effective_category,
+                        severity=severity,
+                        category=category,
                         path=rel(path, root),
                         line=line_no,
-                        title=effective_title,
+                        title=title,
                         evidence=stripped[:240],
                         recommendation=recommendation,
                     )
@@ -524,8 +470,16 @@ def scan_provenance(root: Path, args: argparse.Namespace, findings: list[Finding
                     f"expected {expected_sha}, got {actual_sha}",
                     "Reject the artifact. Do not install or inspect it as trusted source material.",
                 )
-            else:
+            elif getattr(args, "artifact_bound", False):
                 integrity_verified = True
+            else:
+                add_provenance_finding(
+                    findings,
+                    "MEDIUM",
+                    "Release artifact checksum is not bound to the candidate directory",
+                    str(artifact),
+                    "Extract the verified archive in a private staging directory and scan that exact extracted skill before installation.",
+                )
         else:
             add_provenance_finding(
                 findings,
@@ -660,6 +614,22 @@ def scan_structure(root: Path, findings: list[Finding]) -> None:
         )
         return
 
+    try:
+        skill_md_size = skill_md.stat().st_size
+    except OSError:
+        skill_md_size = 256_001
+    if skill_md_size > 256_000:
+        findings.append(
+            Finding(
+                "HIGH",
+                "manifest",
+                "SKILL.md",
+                None,
+                "SKILL.md exceeds the safe review limit",
+                f"{skill_md_size} bytes",
+                "Reject oversized manifests or review the complete file in a controlled environment.",
+            )
+        )
     text = read_text(skill_md, 256_000) or ""
     frontmatter = parse_frontmatter(text)
     if not frontmatter:
@@ -739,18 +709,33 @@ def scan_files(root: Path, max_bytes: int, findings: list[Finding]) -> None:
             )
             continue
 
-        if st.st_size > 1_000_000:
+        if not stat.S_ISREG(st.st_mode):
             findings.append(
                 Finding(
-                    "MEDIUM",
-                    "large-file",
+                    "HIGH",
+                    "special-file",
                     rel_path,
                     None,
-                    "Large file in skill",
-                    f"{st.st_size} bytes",
-                    "Inspect why a skill needs this file; quarantine binary or generated artifacts.",
+                    "Unsupported special file in skill",
+                    oct(stat.S_IFMT(st.st_mode)),
+                    "Reject device files, FIFOs, and sockets from untrusted skill packages.",
                 )
             )
+            continue
+
+        if st.st_size > max_bytes:
+            findings.append(
+                Finding(
+                    "HIGH",
+                    "scan-limit",
+                    rel_path,
+                    None,
+                    "File exceeds the safe review limit",
+                    f"{st.st_size} bytes",
+                    "Reject or manually review the complete file before installation; do not rely on a partial scan.",
+                )
+            )
+            continue
 
         if stat.S_IMODE(st.st_mode) & 0o111:
             findings.append(
