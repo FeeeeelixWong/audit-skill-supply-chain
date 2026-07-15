@@ -16,7 +16,7 @@ Audit an untrusted skill before installing or updating it in Codex, Claude Code,
 - Prefer pinned, inspectable sources: commit SHA, release tag plus checksum, or a local unpacked directory.
 - Use a quarantine directory outside live skill paths until the exact reviewed artifact is approved.
 - Record each promoted skill's reviewed tree hash and recheck it after updates or suspected local changes.
-- For this audit skill's own bootstrap, verify an official release attestation with GitHub CLI before extracting or executing archive content; do not weaken generic scanner rules for self-documentation.
+- For this audit skill's own bootstrap, verify an official release attestation with GitHub CLI before extracting or executing archive content, then use `audit_skill.py bootstrap` with the release SHA256 and explicit `--accept-attested-bootstrap`; do not weaken generic scanner rules for self-documentation.
 - Verify findings before reporting them as vulnerabilities. Treat the scanner output as leads, not proof.
 - Block installation when a finding enables arbitrary code execution, credential access, private-data exfiltration, wallet or payment manipulation, persistence, destructive file changes, or silent network exfiltration.
 

@@ -25,6 +25,7 @@ import scan_installed_skills  # noqa: E402
 import scan_skill  # noqa: E402
 import install_manifest  # noqa: E402
 import audit_skill  # noqa: E402
+import bootstrap_install  # noqa: E402
 
 
 class SecurityRegressionTests(unittest.TestCase):
@@ -278,6 +279,83 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertIn("Integrity manifest:", output.getvalue())
         self.assertEqual(verification["gate"], "ALLOW")
         self.assertEqual(verification["records"][0]["status"], "MATCH")
+
+    def test_attested_bootstrap_requires_explicit_consent(self) -> None:
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["bootstrap_install.py", "--artifact", "release.zip", "--expected-sha256", "0" * 64]), patch.object(
+            bootstrap_install.subprocess, "run"
+        ) as verify_attestation, redirect_stdout(output):
+            exit_code = bootstrap_install.main()
+        self.assertEqual(exit_code, 2)
+        verify_attestation.assert_not_called()
+
+    def test_attested_bootstrap_rejects_a_timed_out_verification(self) -> None:
+        with patch.object(
+            bootstrap_install.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["gh", "attestation", "verify"], bootstrap_install.ATTESTATION_TIMEOUT_SECONDS),
+        ):
+            with self.assertRaisesRegex(ValueError, "timed out"):
+                bootstrap_install.verify_official_attestation(Path("release.zip"))
+
+    def test_attested_bootstrap_records_verified_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            archive = temp / "audit-skill-supply-chain.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr(
+                    "audit-skill-supply-chain/SKILL.md",
+                    "---\nname: audit-skill-supply-chain\ndescription: test\n---\n",
+                )
+                zf.writestr("audit-skill-supply-chain/LICENSE", "MIT\n")
+            expected_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+            destination_root = temp / "live"
+            manifest = temp / "installed-skills.json"
+            output = io.StringIO()
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "bootstrap_install.py",
+                    "--artifact",
+                    str(archive),
+                    "--expected-sha256",
+                    expected_sha256,
+                    "--dest-root",
+                    str(destination_root),
+                    "--manifest",
+                    str(manifest),
+                    "--accept-attested-bootstrap",
+                ],
+            ), patch.object(
+                bootstrap_install.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+            ) as verify_attestation, redirect_stdout(output):
+                exit_code = bootstrap_install.main()
+            verification = install_manifest.verify_manifest(manifest)
+            _manifest_path, recorded_manifest = install_manifest.load_manifest(manifest, require_exists=True)
+        self.assertEqual(exit_code, 0, output.getvalue())
+        self.assertEqual(verification["gate"], "ALLOW")
+        self.assertEqual(verification["records"][0]["status"], "MATCH")
+        self.assertEqual(len(recorded_manifest["installations"]), 1)
+        record = next(iter(recorded_manifest["installations"].values()))
+        self.assertEqual(record["source_url"], bootstrap_install.OFFICIAL_SOURCE_URL)
+        self.assertEqual(record["artifact_sha256"], expected_sha256)
+        verify_attestation.assert_called_once()
+        command = verify_attestation.call_args.args[0]
+        self.assertEqual(command[:3], ["gh", "attestation", "verify"])
+        self.assertEqual(Path(command[3]).resolve(), archive.resolve())
+        self.assertEqual(
+            command[4:],
+            [
+                "--repo",
+                bootstrap_install.OFFICIAL_REPOSITORY,
+                "--signer-workflow",
+                bootstrap_install.OFFICIAL_SIGNER_WORKFLOW,
+                "--source-ref",
+                bootstrap_install.OFFICIAL_RELEASE_REF,
+            ],
+        )
+        self.assertEqual(verify_attestation.call_args.kwargs, {"check": False, "timeout": bootstrap_install.ATTESTATION_TIMEOUT_SECONDS})
 
     def test_interrupted_install_is_quarantined_and_recovers_previous_skill(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

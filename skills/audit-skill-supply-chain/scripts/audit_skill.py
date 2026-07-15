@@ -15,6 +15,7 @@ import install_manifest
 SCRIPT_DIR = Path(__file__).resolve().parent
 FORWARDED_COMMANDS = {
     "baseline": "scan_installed_skills.py",
+    "bootstrap": "bootstrap_install.py",
     "scan": "scan_skill.py",
     "install": "safe_install_skill.py",
 }
@@ -22,8 +23,9 @@ FORWARDED_COMMANDS = {
 
 def print_usage() -> None:
     print(
-        "Usage: audit_skill.py <baseline|scan|install|verify|recover> [options]\n\n"
+        "Usage: audit_skill.py <baseline|bootstrap|scan|install|verify|recover> [options]\n\n"
         "  baseline  Scan already-installed skills.\n"
+        "  bootstrap Install this auditor from an official GitHub-attested release.\n"
         "  scan      Review one quarantined candidate.\n"
         "  install   Scan and install the exact reviewed staging copy.\n"
         "  verify    Compare installed skills with their recorded reviewed hashes.\n"
