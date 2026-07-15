@@ -14,12 +14,14 @@ Agent skills are not just documentation. They can become operating instructions 
 
 It ships as a standard `SKILL.md` directory. The same installable skill works in Codex (`~/.codex/skills`) and Claude Code-style skill directories (`~/.claude/skills`). Codex-specific UI metadata lives in `agents/openai.yaml` and can be ignored by other CLIs.
 
+The static scanner can block or quarantine detected matching patterns and invalid provenance. It cannot prove that every malicious behavior is absent, so an `ALLOW` is evidence for the reviewed artifact, not a blanket safety guarantee.
+
 ## Security Gate at a Glance / 安全闸门一览 🛡️
 
 ![A quarantined skill is scanned before risky data and money paths are blocked or a verified copy is installed](docs/assets/audit-skill-supply-chain-quarantine-flow.png)
 
-An untrusted skill stays isolated while its provenance, content, privacy behavior, and asset-risk signals are reviewed. Risky candidates are blocked; only the exact reviewed copy can be promoted.
-未信任 skill 会先隔离，再审查来源、内容、隐私行为和财产风险信号。高风险候选会被阻断，只有已审查的同一份内容才能安装。
+An untrusted skill stays isolated while its provenance, content, privacy behavior, and asset-risk signals are reviewed. Candidates with detected blocking signals are stopped; only the exact reviewed copy can be promoted.
+未信任 skill 会先隔离，再审查来源、内容、隐私行为和财产风险信号。检测到阻断信号的候选会被停止，只有已审查的同一份内容才能安装。
 
 ## Highlights ✨
 
@@ -93,7 +95,7 @@ python3 skills/audit-skill-supply-chain/scripts/audit_skill.py verify
 
 ## Install This Skill 📦
 
-### Verify an Official Release First
+### Verify and Bootstrap an Official Release
 
 For a release produced after the attested release workflow is enabled, verify the ZIP with GitHub CLI **before extracting or running any file from it**:
 
@@ -105,25 +107,26 @@ gh attestation verify /path/to/audit-skill-supply-chain-vX.Y.Z.zip \
 
 Then compare the ZIP with the accompanying `SHA256SUMS.txt`. The attestation is signed through GitHub's OIDC/Sigstore path and binds the artifact to this repository, the release workflow, and its build commit. This bootstrap check deliberately uses GitHub CLI, not code inside the untrusted archive.
 
-Clone the repository, then install into Codex, Claude Code, or both:
-
 ```bash
-python3 tools/install_skill.py --target all --replace
+shasum -a 256 /path/to/audit-skill-supply-chain-vX.Y.Z.zip
 ```
 
-Manual Codex install:
+The output must exactly match the ZIP entry in the release's `SHA256SUMS.txt`.
+
+Only after both checks pass, extract the verified ZIP into a private quarantine directory and use its attested bootstrap installer. It repeats the attestation and checksum checks, safely extracts the exact ZIP into private staging, installs that staging copy atomically, and records its tree hash in the integrity manifest:
 
 ```bash
-mkdir -p ~/.codex/skills
-cp -R skills/audit-skill-supply-chain ~/.codex/skills/
+umask 077
+quarantine="$(mktemp -d)"
+unzip /path/to/audit-skill-supply-chain-vX.Y.Z.zip -d "$quarantine"
+python3 "$quarantine/audit-skill-supply-chain/scripts/audit_skill.py" bootstrap \
+  --artifact /path/to/audit-skill-supply-chain-vX.Y.Z.zip \
+  --expected-sha256 <64-character-sha256-from-SHA256SUMS.txt> \
+  --cli both \
+  --accept-attested-bootstrap
 ```
 
-Manual Claude Code install:
-
-```bash
-mkdir -p ~/.claude/skills
-cp -R skills/audit-skill-supply-chain ~/.claude/skills/
-```
+The `--accept-attested-bootstrap` flag is explicit consent to trust this narrow, official-release bootstrap path. It does not authorize access to private data, wallets, or payment systems. Do not use this bootstrap command for any third-party skill; use the normal `audit_skill.py install` gate instead. Add `--replace` only when you explicitly approve replacing an existing auditor installation.
 
 Use the skill by asking your agent CLI:
 
@@ -144,7 +147,7 @@ python3 ~/.codex/skills/audit-skill-supply-chain/scripts/audit_skill.py baseline
 2. **Verify provenance**: require a full commit SHA or a verified release checksum.
 3. **Run static scanning**: inspect manifests, scripts, references, assets, symlinks, hidden files, URLs, and high-risk phrases.
 4. **Review privacy and money flows**: check whether the skill can access private data, credentials, wallets, payment systems, or production systems.
-5. **Decide the install gate**: return `BLOCK`, `QUARANTINE`, `ALLOW WITH CONDITIONS`, or `ALLOW`.
+5. **Decide the install gate**: return `BLOCK`, `QUARANTINE`, `ALLOW WITH CONDITIONS`, or `ALLOW`. An `ALLOW WITH CONDITIONS` install requires `--allow-conditions` only after the user explicitly approves every privacy- or money-sensitive condition.
 6. **Promote exact artifact only**: if allowed, promote the same private staging copy into the live install path and record its tree hash.
 7. **Recheck before later trust**: run `audit_skill.py verify` after an update or suspected local modification; changed content returns `QUARANTINE`.
 
@@ -188,11 +191,13 @@ This can create or update `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.github/copilo
 
 ## What It Blocks 🚫
 
-- Remote code execution patterns such as downloaded scripts executed immediately.
-- Reads or uploads of `.env`, SSH keys, cloud credentials, browser profiles, agent configs, or shell history.
-- Silent exfiltration of prompts, logs, local files, source code, email, cloud-drive data, private repositories, or connector data.
-- Wallet seed phrases, private keys, exchange API secrets, transaction signing, token transfers, withdrawals, payout changes, refunds, or payment abuse.
-- Prompt-injection language that tells the agent to ignore higher-priority instructions or hide behavior from the user.
+The gate blocks or quarantines detected matching patterns and failed integrity checks. It does not claim to detect every possible malicious behavior.
+
+- Detected remote-code-execution patterns such as downloaded scripts executed immediately.
+- Detected reads or uploads of `.env`, SSH keys, cloud credentials, browser profiles, agent configs, or shell history.
+- Detected silent exfiltration of prompts, logs, local files, source code, email, cloud-drive data, private repositories, or connector data.
+- Detected wallet seed phrases, private keys, exchange API secrets, transaction signing, token transfers, withdrawals, payout changes, refunds, or payment abuse.
+- Detected prompt-injection language that tells the agent to ignore higher-priority instructions or hide behavior from the user.
 - GitHub source mismatch, unpinned branch/tag installs, or checksum mismatch.
 - Post-install changes, missing directories, or symlink replacement of a tracked skill.
 
@@ -203,7 +208,7 @@ This project is a defensive review tool. It does not prove a skill is safe. It r
 - `BLOCK`: confirmed high-impact risk.
 - `QUARANTINE`: provenance or behavior cannot be verified.
 - `ALLOW WITH CONDITIONS`: low-risk issues remain and must be constrained.
-- `ALLOW`: no material issue found in the reviewed artifact.
+- `ALLOW`: no material issue was detected in the reviewed artifact; it is not proof of complete safety.
 
 An `ALLOW` applies to the reviewed tree, not to future untracked changes. Run `audit_skill.py verify` to detect integrity drift before later trust or use.
 
@@ -227,6 +232,8 @@ These services provide review evidence, not a safety guarantee and not an automa
 Agent skill 不只是普通文档。它可能会成为 agent 的操作说明，而 agent 可能拥有文件系统、Shell、网络、连接器、钱包、支付或代码仓库权限。本项目用于在安装第三方 skill 之前进行审查，重点防止隐私泄漏、凭据盗取、供应链替换和财产损失。
 
 它以标准 `SKILL.md` 目录形式发布。同一份可安装 skill 可用于 Codex（`~/.codex/skills`）和 Claude Code 风格 skill 目录（`~/.claude/skills`）。`agents/openai.yaml` 是 Codex UI 元数据，其他 CLI 可以忽略。
+
+静态扫描器会阻断或隔离已检测到的匹配风险信号和无效来源，但不能证明所有恶意行为都不存在。因此，`ALLOW` 只是已审查产物的证据，不是无条件的安全保证。
 
 ## 项目亮点 ✨
 
@@ -300,7 +307,7 @@ python3 skills/audit-skill-supply-chain/scripts/audit_skill.py verify
 
 ## 安装这个 Skill 📦
 
-### 先验证官方 Release
+### 验证并自举安装官方 Release
 
 对于启用带 attestation 发布工作流之后创建的 release，在解压或运行其中任何文件**之前**，先用 GitHub CLI 验证 ZIP：
 
@@ -312,25 +319,26 @@ gh attestation verify /path/to/audit-skill-supply-chain-vX.Y.Z.zip \
 
 随后将 ZIP 与同一 Release 附带的 `SHA256SUMS.txt` 比对。该 attestation 经 GitHub OIDC/Sigstore 路径签名，会把产物绑定到本仓库、发布工作流和构建 commit。这个启动信任检查刻意使用 GitHub CLI，而不执行未验证压缩包中的代码。
 
-克隆仓库后，可以安装到 Codex、Claude Code 或两者：
-
 ```bash
-python3 tools/install_skill.py --target all --replace
+shasum -a 256 /path/to/audit-skill-supply-chain-vX.Y.Z.zip
 ```
 
-手动安装到 Codex：
+输出必须与同一 Release 的 `SHA256SUMS.txt` 中 ZIP 条目完全一致。
+
+两项验证都通过后，才可以把 ZIP 解压到私有隔离目录，并使用其中的已证明自举安装器。它会再次验证 attestation 和 checksum，把同一 ZIP 安全解压到私有暂存区，原子安装该暂存副本，并把树哈希记录到完整性台账：
 
 ```bash
-mkdir -p ~/.codex/skills
-cp -R skills/audit-skill-supply-chain ~/.codex/skills/
+umask 077
+quarantine="$(mktemp -d)"
+unzip /path/to/audit-skill-supply-chain-vX.Y.Z.zip -d "$quarantine"
+python3 "$quarantine/audit-skill-supply-chain/scripts/audit_skill.py" bootstrap \
+  --artifact /path/to/audit-skill-supply-chain-vX.Y.Z.zip \
+  --expected-sha256 <SHA256SUMS.txt 中的 64 位 SHA256> \
+  --cli both \
+  --accept-attested-bootstrap
 ```
 
-手动安装到 Claude Code：
-
-```bash
-mkdir -p ~/.claude/skills
-cp -R skills/audit-skill-supply-chain ~/.claude/skills/
-```
+`--accept-attested-bootstrap` 表示用户明确同意信任这条狭窄的官方 Release 自举路径；它不授权访问私有数据、钱包或支付系统。不要对任何第三方 skill 使用该自举命令，第三方 skill 必须走普通 `audit_skill.py install` 安装闸门。只有明确同意替换已安装审计器时，才添加 `--replace`。
 
 在你的 agent CLI 中这样调用：
 
@@ -351,7 +359,7 @@ python3 ~/.codex/skills/audit-skill-supply-chain/scripts/audit_skill.py baseline
 2. **验证来源**：要求完整 commit SHA 或已验证 release checksum。
 3. **运行静态扫描**：检查 manifest、脚本、参考文件、资产、符号链接、隐藏文件、URL 和高风险语句。
 4. **审查隐私和资金路径**：确认 skill 是否能访问私有数据、凭据、钱包、支付系统或生产系统。
-5. **给出安装闸门结论**：返回 `BLOCK`、`QUARANTINE`、`ALLOW WITH CONDITIONS` 或 `ALLOW`。
+5. **给出安装闸门结论**：返回 `BLOCK`、`QUARANTINE`、`ALLOW WITH CONDITIONS` 或 `ALLOW`。对于 `ALLOW WITH CONDITIONS`，必须在用户明确同意每一项隐私或资金敏感条件后，才可使用 `--allow-conditions` 安装。
 6. **只提升已审查产物**：如果允许安装，只提升私有暂存中的同一份已审查 skill，并记录它的树哈希。
 7. **后续信任前复核**：更新后或怀疑本地内容被改动时运行 `audit_skill.py verify`；发生漂移即返回 `QUARANTINE`。
 
@@ -395,11 +403,13 @@ python3 tools/create_cli_adapter.py --project /path/to/project --target all
 
 ## 它会阻断什么 🚫
 
-- 下载后立即执行的远程代码执行模式。
-- 读取或上传 `.env`、SSH key、云凭据、浏览器资料、agent 配置或 shell 历史。
-- 静默外传 prompts、日志、本地文件、源码、邮箱、云盘数据、私有仓库或连接器数据。
-- 钱包助记词、私钥、交易所 API secret、交易签名、代币转账、提现、收款地址变更、退款或支付滥用。
-- 要求 agent 忽略高优先级指令、绕过安全边界或向用户隐藏行为的 prompt injection。
+安装闸门会阻断或隔离已检测到的匹配风险模式和完整性失败，但不声称能够发现所有可能的恶意行为。
+
+- 检测到下载后立即执行的远程代码执行模式。
+- 检测到读取或上传 `.env`、SSH key、云凭据、浏览器资料、agent 配置或 shell 历史。
+- 检测到静默外传 prompts、日志、本地文件、源码、邮箱、云盘数据、私有仓库或连接器数据。
+- 检测到钱包助记词、私钥、交易所 API secret、交易签名、代币转账、提现、收款地址变更、退款或支付滥用。
+- 检测到要求 agent 忽略高优先级指令、绕过安全边界或向用户隐藏行为的 prompt injection。
 - GitHub 来源不匹配、未 pin 的 branch/tag 安装、checksum 不匹配。
 - 已记录 skill 被修改、目录缺失或被符号链接替换。
 
@@ -410,7 +420,7 @@ python3 tools/create_cli_adapter.py --project /path/to/project --target all
 - `BLOCK`：确认存在高影响风险。
 - `QUARANTINE`：来源或行为无法验证。
 - `ALLOW WITH CONDITIONS`：仍有低风险问题，需要约束后安装。
-- `ALLOW`：已审查产物中未发现实质风险。
+- `ALLOW`：已审查产物中未检测到实质风险，不等于完全安全的证明。
 
 `ALLOW` 只适用于已审查的内容树，不自动覆盖后续未审查的变更。再次信任或使用前，可运行 `audit_skill.py verify` 检查完整性漂移。
 
