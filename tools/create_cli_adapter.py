@@ -24,11 +24,11 @@ Before installing, importing, updating, or trusting any third-party agent skill:
 Preferred commands:
 
 ```bash
-python3 {skill_path}/scripts/scan_skill.py /path/to/quarantined-skill \\
+python3 {skill_path}/scripts/audit_skill.py scan /path/to/quarantined-skill \\
   --source-url https://github.com/owner/repo \\
   --expected-commit <40-character-commit-sha>
 
-python3 {skill_path}/scripts/safe_install_skill.py /path/to/quarantined-skill \\
+python3 {skill_path}/scripts/audit_skill.py install /path/to/quarantined-skill \\
   --cli both \\
   --source-url https://github.com/owner/repo \\
   --expected-commit <40-character-commit-sha>
@@ -37,8 +37,10 @@ python3 {skill_path}/scripts/safe_install_skill.py /path/to/quarantined-skill \\
 For installed-skill baseline scans:
 
 ```bash
-python3 {skill_path}/scripts/scan_installed_skills.py \\
+python3 {skill_path}/scripts/audit_skill.py baseline \\
   --report ~/.agent-skill-audit/installed-skills-baseline.md
+
+python3 {skill_path}/scripts/audit_skill.py verify
 ```
 """
 

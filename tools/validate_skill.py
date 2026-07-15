@@ -56,6 +56,8 @@ def main() -> int:
         SKILL / "scripts" / "scan_skill.py",
         SKILL / "scripts" / "scan_installed_skills.py",
         SKILL / "scripts" / "safe_install_skill.py",
+        SKILL / "scripts" / "install_manifest.py",
+        SKILL / "scripts" / "audit_skill.py",
         ROOT / "tools" / "install_skill.py",
         ROOT / "tools" / "create_cli_adapter.py",
     ]

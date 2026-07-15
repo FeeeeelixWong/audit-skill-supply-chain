@@ -23,6 +23,8 @@ sys.path.insert(0, str(SCRIPTS))
 import safe_install_skill  # noqa: E402
 import scan_installed_skills  # noqa: E402
 import scan_skill  # noqa: E402
+import install_manifest  # noqa: E402
+import audit_skill  # noqa: E402
 
 
 class SecurityRegressionTests(unittest.TestCase):
@@ -238,6 +240,153 @@ class SecurityRegressionTests(unittest.TestCase):
                 exit_code = safe_install_skill.main()
         self.assertEqual(exit_code, 0)
         self.assertIn("Dry run: would install verified staging copy", output.getvalue())
+        self.assertIn("Dry run: would record integrity manifest", output.getvalue())
+
+    def test_safe_install_records_and_verifies_the_promoted_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            archive = temp / "skill.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("example-skill/SKILL.md", "---\nname: example-skill\ndescription: test\n---\n")
+                zf.writestr("example-skill/LICENSE", "MIT\n")
+            destination_root = temp / "live"
+            manifest = temp / "installed-skills.json"
+            output = io.StringIO()
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "safe_install_skill.py",
+                    "--artifact",
+                    str(archive),
+                    "--expected-sha256",
+                    hashlib.sha256(archive.read_bytes()).hexdigest(),
+                    "--dest-root",
+                    str(destination_root),
+                    "--manifest",
+                    str(manifest),
+                ],
+            ), redirect_stdout(output):
+                exit_code = safe_install_skill.main()
+            destination = destination_root / "example-skill"
+            verification = install_manifest.verify_manifest(manifest)
+            destination_exists = destination.is_dir()
+            manifest_mode = manifest.stat().st_mode & 0o777
+        self.assertEqual(exit_code, 0, output.getvalue())
+        self.assertTrue(destination_exists)
+        self.assertEqual(manifest_mode, 0o600)
+        self.assertIn("Integrity manifest:", output.getvalue())
+        self.assertEqual(verification["gate"], "ALLOW")
+        self.assertEqual(verification["records"][0]["status"], "MATCH")
+
+    def test_interrupted_install_is_quarantined_and_recovers_previous_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            destination_root = temp / "live"
+            destination = self.make_skill(destination_root / "example-skill")
+            (destination / "SKILL.md").write_text(
+                "---\nname: example-skill\ndescription: previously reviewed\n---\n",
+                encoding="utf-8",
+            )
+            previous_hash = scan_skill.sha256_tree(destination)
+            manifest = temp / "installed-skills.json"
+            install_manifest.record_installations(
+                manifest,
+                [destination],
+                skill_name="example-skill",
+                tree_sha256=previous_hash,
+                source_url=None,
+                expected_commit=None,
+                artifact_sha256=None,
+                gate="ALLOW",
+            )
+            archive = temp / "replacement.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("example-skill/SKILL.md", "---\nname: example-skill\ndescription: replacement\n---\n")
+                zf.writestr("example-skill/LICENSE", "MIT\n")
+            arguments = [
+                "safe_install_skill.py",
+                "--artifact",
+                str(archive),
+                "--expected-sha256",
+                hashlib.sha256(archive.read_bytes()).hexdigest(),
+                "--dest-root",
+                str(destination_root),
+                "--manifest",
+                str(manifest),
+                "--replace",
+            ]
+            with patch.object(sys, "argv", arguments), patch.object(
+                safe_install_skill.install_manifest, "write_manifest", side_effect=KeyboardInterrupt
+            ), self.assertRaises(KeyboardInterrupt):
+                safe_install_skill.main()
+            pending = install_manifest.verify_manifest(manifest)
+            recovered = install_manifest.recover_pending_transaction(manifest)
+            restored_hash = scan_skill.sha256_tree(destination)
+            verification = install_manifest.verify_manifest(manifest)
+        self.assertEqual(pending["gate"], "QUARANTINE")
+        self.assertEqual(pending["records"][0]["status"], "PENDING_TRANSACTION")
+        self.assertEqual(recovered, "rolled back interrupted install transaction")
+        self.assertEqual(restored_hash, previous_hash)
+        self.assertEqual(verification["gate"], "ALLOW")
+
+    def test_integrity_verification_quarantines_changed_installation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            destination = self.make_skill(temp / "live" / "example-skill")
+            manifest = temp / "installed-skills.json"
+            install_manifest.record_installations(
+                manifest,
+                [destination],
+                skill_name="example-skill",
+                tree_sha256=scan_skill.sha256_tree(destination),
+                source_url="https://github.com/owner/repo",
+                expected_commit="0" * 40,
+                artifact_sha256=None,
+                gate="ALLOW",
+            )
+            (destination / "SKILL.md").write_text(
+                "---\nname: example-skill\ndescription: changed after review\n---\n",
+                encoding="utf-8",
+            )
+            verification = install_manifest.verify_manifest(manifest)
+        self.assertEqual(verification["gate"], "QUARANTINE")
+        self.assertEqual(verification["records"][0]["status"], "CHANGED")
+
+    def test_unified_verify_command_returns_nonzero_for_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            destination = self.make_skill(temp / "live" / "example-skill")
+            manifest = temp / "installed-skills.json"
+            install_manifest.record_installations(
+                manifest,
+                [destination],
+                skill_name="example-skill",
+                tree_sha256=scan_skill.sha256_tree(destination),
+                source_url=None,
+                expected_commit=None,
+                artifact_sha256=None,
+                gate="ALLOW",
+            )
+            (destination / "extra.md").write_text("drift\n", encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = audit_skill.main(["verify", "--manifest", str(manifest)])
+        self.assertEqual(exit_code, 2)
+        self.assertIn("Gate: QUARANTINE", output.getvalue())
+
+    def test_manifest_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            target = temp / "target.json"
+            target.write_text('{"schema_version": 1, "installations": {}}\n', encoding="utf-8")
+            manifest = temp / "installed-skills.json"
+            try:
+                os.symlink(target, manifest)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            with self.assertRaisesRegex(ValueError, "regular file"):
+                install_manifest.verify_manifest(manifest)
 
     def test_directory_staging_preserves_pinned_git_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
