@@ -21,6 +21,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import scan_skill  # noqa: E402
+import install_manifest  # noqa: E402
 
 
 BLOCKING_GATES = {"BLOCK", "QUARANTINE"}
@@ -200,39 +201,61 @@ def remove_directory(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def install_staged_skill(candidate: Path, destinations: list[Path], replace: bool) -> None:
+def install_staged_skill(
+    candidate: Path,
+    destinations: list[Path],
+    replace: bool,
+    expected_tree_sha256: str,
+    manifest_path: Path,
+    manifest_existed: bool,
+    manifest_before: dict,
+    manifest_after: dict,
+) -> tuple[Path, dict]:
     preflight_destinations(destinations, replace)
     token = uuid.uuid4().hex
-    prepared: list[tuple[Path, Path]] = []
-    backups: dict[Path, Path] = {}
-    promoted: list[Path] = []
+    entries = [
+        {
+            "destination": str(destination),
+            "temporary": str(destination.parent / f".{destination.name}.audit-stage-{token}"),
+            "backup": str(destination.parent / f".{destination.name}.audit-backup-{token}"),
+            "had_existing": destination.exists(),
+        }
+        for destination in destinations
+    ]
+    journal_path = install_manifest.begin_transaction(
+        manifest_path,
+        manifest_existed=manifest_existed,
+        manifest_before=manifest_before,
+        manifest_after=manifest_after,
+        entries=entries,
+        expected_tree_sha256=expected_tree_sha256,
+    )
+    transaction = install_manifest.load_transaction(manifest_path)
+    if transaction is None:
+        raise RuntimeError("install transaction disappeared before promotion")
+    _transaction_path, transaction_data = transaction
 
     try:
-        for destination in destinations:
+        for entry in entries:
+            destination = Path(entry["destination"])
+            temporary = Path(entry["temporary"])
             destination.parent.mkdir(parents=True, exist_ok=True)
-            temporary = destination.parent / f".{destination.name}.audit-stage-{token}"
             shutil.copytree(candidate, temporary, symlinks=True, ignore=ignore_install_entries)
-            prepared.append((destination, temporary))
+            if scan_skill.sha256_tree(temporary) != expected_tree_sha256:
+                raise ValueError("prepared install copy did not match the reviewed staging hash")
 
-        for destination, temporary in prepared:
+        for entry in entries:
+            destination = Path(entry["destination"])
+            temporary = Path(entry["temporary"])
+            backup = Path(entry["backup"])
             if destination.exists():
-                backup = destination.parent / f".{destination.name}.audit-backup-{token}"
                 os.replace(destination, backup)
-                backups[destination] = backup
             os.replace(temporary, destination)
-            promoted.append(destination)
+        install_manifest.update_transaction_state(journal_path, transaction_data, "promoted")
     except Exception:
-        for destination in reversed(promoted):
-            remove_directory(destination)
-        for destination, backup in backups.items():
-            if backup.exists() and not destination.exists():
-                os.replace(backup, destination)
-        for _destination, temporary in prepared:
-            remove_directory(temporary)
+        install_manifest.recover_pending_transaction(manifest_path)
         raise
-    else:
-        for backup in backups.values():
-            remove_directory(backup)
+    return journal_path, transaction_data
 
 
 def main() -> int:
@@ -252,6 +275,11 @@ def main() -> int:
     parser.add_argument("--allow-conditions", action="store_true", help="Allow ALLOW WITH CONDITIONS installs")
     parser.add_argument("--replace", action="store_true", help="Replace existing destination skill directory")
     parser.add_argument("--dry-run", action="store_true", help="Stage, scan, and report without copying to a live destination")
+    parser.add_argument(
+        "--manifest",
+        default=str(install_manifest.default_manifest_path()),
+        help="Integrity manifest written after a successful install",
+    )
     args = parser.parse_args()
 
     if args.candidate and args.artifact:
@@ -259,6 +287,9 @@ def main() -> int:
         return 1
 
     try:
+        recovery = install_manifest.recover_pending_transaction(args.manifest)
+        if recovery:
+            print(f"Recovered: {recovery}")
         with tempfile.TemporaryDirectory(prefix="audit-skill-stage-") as temporary_dir:
             candidate, artifact_bound = prepare_staged_candidate(args, Path(temporary_dir))
             skill_md = candidate / "SKILL.md"
@@ -279,17 +310,54 @@ def main() -> int:
                 print("Install requires --allow-conditions after manual review.")
                 return 2
             preflight_destinations(destinations, args.replace)
+            reviewed_tree_sha256 = scan_skill.sha256_tree(candidate)
             if args.dry_run:
                 for destination in destinations:
                     print(f"Dry run: would install verified staging copy -> {destination}")
+                print(f"Dry run: would record integrity manifest -> {Path(args.manifest).expanduser()}")
                 return 0
-            install_staged_skill(candidate, destinations, args.replace)
+            manifest_path, manifest_existed, manifest_before, manifest_after = install_manifest.prepare_installation_manifest(
+                args.manifest,
+                destinations,
+                skill_name=skill_name,
+                tree_sha256=reviewed_tree_sha256,
+                source_url=args.source_url,
+                expected_commit=args.expected_commit,
+                artifact_sha256=args.expected_sha256 if artifact_bound else None,
+                gate=gate,
+            )
+            journal_path, transaction = install_staged_skill(
+                candidate,
+                destinations,
+                args.replace,
+                reviewed_tree_sha256,
+                manifest_path,
+                manifest_existed,
+                manifest_before,
+                manifest_after,
+            )
+            try:
+                install_manifest.write_manifest(manifest_path, manifest_after)
+                install_manifest.update_transaction_state(journal_path, transaction, "manifest-written")
+                install_manifest.recover_pending_transaction(manifest_path)
+            except Exception as exc:
+                try:
+                    install_manifest.recover_pending_transaction(manifest_path)
+                except Exception as recovery_exc:
+                    exc = RuntimeError(f"{exc}; recovery also failed: {recovery_exc}")
+                print(
+                    "error: install transaction was rolled back because the integrity record could not be written: "
+                    f"{exc}",
+                    file=sys.stderr,
+                )
+                return 1
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     for destination in destinations:
         print(f"Installed: {destination}")
+    print(f"Integrity manifest: {manifest_path}")
     return 0
 
 
