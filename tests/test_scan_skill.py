@@ -289,6 +289,15 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         verify_attestation.assert_not_called()
 
+    def test_attested_bootstrap_rejects_a_timed_out_verification(self) -> None:
+        with patch.object(
+            bootstrap_install.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["gh", "attestation", "verify"], bootstrap_install.ATTESTATION_TIMEOUT_SECONDS),
+        ):
+            with self.assertRaisesRegex(ValueError, "timed out"):
+                bootstrap_install.verify_official_attestation(Path("release.zip"))
+
     def test_attested_bootstrap_records_verified_release(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -332,6 +341,21 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(record["source_url"], bootstrap_install.OFFICIAL_SOURCE_URL)
         self.assertEqual(record["artifact_sha256"], expected_sha256)
         verify_attestation.assert_called_once()
+        command = verify_attestation.call_args.args[0]
+        self.assertEqual(command[:3], ["gh", "attestation", "verify"])
+        self.assertEqual(Path(command[3]).resolve(), archive.resolve())
+        self.assertEqual(
+            command[4:],
+            [
+                "--repo",
+                bootstrap_install.OFFICIAL_REPOSITORY,
+                "--signer-workflow",
+                bootstrap_install.OFFICIAL_SIGNER_WORKFLOW,
+                "--source-ref",
+                bootstrap_install.OFFICIAL_RELEASE_REF,
+            ],
+        )
+        self.assertEqual(verify_attestation.call_args.kwargs, {"check": False, "timeout": bootstrap_install.ATTESTATION_TIMEOUT_SECONDS})
 
     def test_interrupted_install_is_quarantined_and_recovers_previous_skill(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

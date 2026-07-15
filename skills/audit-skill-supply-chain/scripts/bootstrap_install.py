@@ -17,8 +17,10 @@ import scan_skill
 OFFICIAL_REPOSITORY = "FeeeeelixWong/audit-skill-supply-chain"
 OFFICIAL_SOURCE_URL = f"https://github.com/{OFFICIAL_REPOSITORY}"
 OFFICIAL_SIGNER_WORKFLOW = f"{OFFICIAL_REPOSITORY}/.github/workflows/release.yml"
+OFFICIAL_RELEASE_REF = "refs/tags/*"
 SKILL_NAME = "audit-skill-supply-chain"
 ATTESTED_BOOTSTRAP_GATE = "ALLOW (ATTESTED BOOTSTRAP)"
+ATTESTATION_TIMEOUT_SECONDS = 60
 
 
 def verify_official_attestation(artifact: Path) -> None:
@@ -31,11 +33,15 @@ def verify_official_attestation(artifact: Path) -> None:
         OFFICIAL_REPOSITORY,
         "--signer-workflow",
         OFFICIAL_SIGNER_WORKFLOW,
+        "--source-ref",
+        OFFICIAL_RELEASE_REF,
     ]
     try:
-        result = subprocess.run(command, check=False)
+        result = subprocess.run(command, check=False, timeout=ATTESTATION_TIMEOUT_SECONDS)
     except FileNotFoundError as exc:
         raise ValueError("GitHub CLI is required to verify the official release attestation") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("official release attestation verification timed out") from exc
     if result.returncode != 0:
         raise ValueError("official release attestation verification failed")
 

@@ -102,7 +102,8 @@ For a release produced after the attested release workflow is enabled, verify th
 ```bash
 gh attestation verify /path/to/audit-skill-supply-chain-vX.Y.Z.zip \
   --repo FeeeeelixWong/audit-skill-supply-chain \
-  --signer-workflow FeeeeelixWong/audit-skill-supply-chain/.github/workflows/release.yml
+  --signer-workflow FeeeeelixWong/audit-skill-supply-chain/.github/workflows/release.yml \
+  --source-ref "refs/tags/*"
 ```
 
 Then compare the ZIP with the accompanying `SHA256SUMS.txt`. The attestation is signed through GitHub's OIDC/Sigstore path and binds the artifact to this repository, the release workflow, and its build commit. This bootstrap check deliberately uses GitHub CLI, not code inside the untrusted archive.
@@ -314,7 +315,8 @@ python3 skills/audit-skill-supply-chain/scripts/audit_skill.py verify
 ```bash
 gh attestation verify /path/to/audit-skill-supply-chain-vX.Y.Z.zip \
   --repo FeeeeelixWong/audit-skill-supply-chain \
-  --signer-workflow FeeeeelixWong/audit-skill-supply-chain/.github/workflows/release.yml
+  --signer-workflow FeeeeelixWong/audit-skill-supply-chain/.github/workflows/release.yml \
+  --source-ref "refs/tags/*"
 ```
 
 随后将 ZIP 与同一 Release 附带的 `SHA256SUMS.txt` 比对。该 attestation 经 GitHub OIDC/Sigstore 路径签名，会把产物绑定到本仓库、发布工作流和构建 commit。这个启动信任检查刻意使用 GitHub CLI，而不执行未验证压缩包中的代码。
