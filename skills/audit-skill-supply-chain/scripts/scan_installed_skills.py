@@ -93,7 +93,7 @@ def run_scan(skill_dir: Path, max_bytes: int) -> dict:
             scan_skill.scan_structure(skill_dir, findings)
             scan_skill.scan_files(skill_dir, max_bytes, findings)
     except Exception as exc:
-        findings = [
+        findings.append(
             scan_skill.Finding(
                 "HIGH",
                 "scanner-error",
@@ -103,14 +103,7 @@ def run_scan(skill_dir: Path, max_bytes: int) -> dict:
                 str(exc),
                 "Review this skill manually before trusting it.",
             )
-        ]
-        return {
-            "target": str(skill_dir),
-            "gate": scan_skill.gate_for_findings(findings),
-            "summary": scan_skill.summarize(findings),
-            "decision": scan_skill.decision_for_findings(findings),
-            "findings": [asdict(finding) for finding in findings],
-        }
+        )
     return {
         "target": str(skill_dir),
         "gate": scan_skill.gate_for_findings(findings),

@@ -44,6 +44,16 @@ TEXT_SUFFIXES = {
     ".zsh",
 }
 
+KNOWN_DOCUMENTATION_PATH_PREFIXES = {
+    "code.visualstudio.com": ("/docs",),
+    "developer.mozilla.org": ("/",),
+    "docs.anthropic.com": ("/",),
+    "docs.github.com": ("/",),
+    "docs.python.org": ("/",),
+    "nodejs.org": ("/docs",),
+    "platform.openai.com": ("/docs",),
+}
+
 # These are the only directories the installer deliberately omits. Every other
 # entry must be included in both the static scan and the tree digest.
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache"}
@@ -156,11 +166,11 @@ PATTERNS: list[tuple[str, str, str, re.Pattern[str], str]] = [
         "Inspect the decoded content and replace obfuscation with readable source.",
     ),
     (
-        "LOW",
+        "MEDIUM",
         "external-url",
         "References external URL",
         re.compile(r"https?://[^\s)>'\"]+", re.I),
-        "Verify the domain and whether the URL is documentation, download, or outbound data transfer. A URL alone is not evidence of exfiltration.",
+        "Verify the domain and whether the URL is documentation, download, or outbound data transfer before installation.",
     ),
     (
         "LOW",
@@ -226,22 +236,57 @@ def read_text(path: Path, max_bytes: int) -> str | None:
         return data.decode("utf-8", errors="replace")
 
 
+def is_known_documentation_url(value: str) -> bool:
+    """Return whether a URL is a conservative match for a well-known docs site."""
+    parsed = urlparse(value)
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    path_prefixes = KNOWN_DOCUMENTATION_PATH_PREFIXES.get(parsed.hostname or "")
+    return bool(
+        parsed.scheme == "https"
+        and path_prefixes
+        and any(
+            prefix == "/" or parsed.path == prefix or parsed.path.startswith(f"{prefix}/")
+            for prefix in path_prefixes
+        )
+        and parsed.username is None
+        and parsed.password is None
+        and port is None
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
 def add_findings_for_text(path: Path, root: Path, text: str, findings: list[Finding]) -> None:
     for line_no, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
         if not stripped:
             continue
         for severity, category, title, pattern, recommendation in PATTERNS:
-            if pattern.search(stripped):
+            matches = pattern.finditer(stripped) if category == "external-url" else (pattern.search(stripped),)
+            for match in matches:
+                if match is None:
+                    continue
+                finding_severity = severity
+                finding_title = title
+                finding_recommendation = recommendation
+                if category == "external-url" and is_known_documentation_url(match.group(0)):
+                    finding_severity = "LOW"
+                    finding_title = "References known documentation URL"
+                    finding_recommendation = (
+                        "Confirm the link is relevant documentation. This conservative docs-only exception does not apply to downloads, APIs, or other hosts."
+                    )
                 findings.append(
                     Finding(
-                        severity=severity,
+                        severity=finding_severity,
                         category=category,
                         path=rel(path, root),
                         line=line_no,
-                        title=title,
+                        title=finding_title,
                         evidence=stripped[:240],
-                        recommendation=recommendation,
+                        recommendation=finding_recommendation,
                     )
                 )
 
@@ -832,7 +877,16 @@ def decision_for_findings(findings: list[Finding], max_signals: int = 5) -> dict
 
     signals = []
     seen: set[tuple[str, str, str, int | None]] = set()
-    for finding in sorted(findings, key=lambda item: (-SEVERITY_ORDER[item.severity], item.path, item.line or 0)):
+    for finding in sorted(
+        findings,
+        key=lambda item: (
+            -SEVERITY_ORDER[item.severity],
+            item.path,
+            item.line or 0,
+            item.category,
+            item.title,
+        ),
+    ):
         if len(signals) >= max_signals:
             break
         key = (finding.severity, finding.category, finding.path, finding.line)
