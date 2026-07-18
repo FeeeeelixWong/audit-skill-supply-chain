@@ -93,26 +93,22 @@ def run_scan(skill_dir: Path, max_bytes: int) -> dict:
             scan_skill.scan_structure(skill_dir, findings)
             scan_skill.scan_files(skill_dir, max_bytes, findings)
     except Exception as exc:
-        return {
-            "target": str(skill_dir),
-            "gate": "BLOCK",
-            "summary": {"INFO": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 1, "CRITICAL": 0},
-            "findings": [
-                {
-                    "severity": "HIGH",
-                    "category": "scanner-error",
-                    "path": ".",
-                    "line": None,
-                    "title": "Scanner failed",
-                    "evidence": str(exc),
-                    "recommendation": "Review this skill manually before trusting it.",
-                }
-            ],
-        }
+        findings.append(
+            scan_skill.Finding(
+                "HIGH",
+                "scanner-error",
+                ".",
+                None,
+                "Scanner failed",
+                str(exc),
+                "Review this skill manually before trusting it.",
+            )
+        )
     return {
         "target": str(skill_dir),
         "gate": scan_skill.gate_for_findings(findings),
         "summary": scan_skill.summarize(findings),
+        "decision": scan_skill.decision_for_findings(findings),
         "findings": [asdict(finding) for finding in findings],
     }
 
@@ -176,6 +172,14 @@ def write_markdown_report(path: Path, roots: list[Path], results: list[dict]) ->
                 low=summary.get("LOW", 0),
                 info=summary.get("INFO", 0),
             )
+        )
+
+    lines.extend(["", "## Recommended Actions", ""])
+    for result in results:
+        decision = result.get("decision", {})
+        lines.append(
+            f"- `{result.get('gate', 'UNKNOWN')}` {markdown_literal(result.get('target', ''))}: "
+            f"{markdown_literal(decision.get('recommended_action', 'Review the findings before installation.'))}"
         )
 
     lines.extend(["", "## Actionable Findings", ""])
@@ -242,6 +246,9 @@ def main() -> int:
                 f"(C={summary.get('CRITICAL', 0)}, H={summary.get('HIGH', 0)}, "
                 f"M={summary.get('MEDIUM', 0)}, L={summary.get('LOW', 0)}, actionable={actionable})"
             )
+            decision = result.get("decision", {})
+            if decision:
+                print(f"  Next action: {decision.get('recommended_action')}")
         if args.report:
             print(f"Report: {Path(args.report).expanduser()}")
 

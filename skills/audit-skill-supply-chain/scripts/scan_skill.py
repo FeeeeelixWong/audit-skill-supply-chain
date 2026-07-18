@@ -44,6 +44,16 @@ TEXT_SUFFIXES = {
     ".zsh",
 }
 
+KNOWN_DOCUMENTATION_PATH_PREFIXES = {
+    "code.visualstudio.com": ("/docs",),
+    "developer.mozilla.org": ("/",),
+    "docs.anthropic.com": ("/",),
+    "docs.github.com": ("/",),
+    "docs.python.org": ("/",),
+    "nodejs.org": ("/docs",),
+    "platform.openai.com": ("/docs",),
+}
+
 # These are the only directories the installer deliberately omits. Every other
 # entry must be included in both the static scan and the tree digest.
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache"}
@@ -96,7 +106,12 @@ PATTERNS: list[tuple[str, str, str, re.Pattern[str], str]] = [
         "HIGH",
         "persistence",
         "Attempts persistence through startup files, hooks, or scheduled tasks",
-        re.compile(r"(\.bashrc|\.zshrc|\.profile|crontab|LaunchAgents|launchctl|\.git/hooks|post-checkout|pre-commit|postinstall|preinstall|prepare)", re.I),
+        re.compile(
+            r"(\.bashrc|\.zshrc|\.profile|crontab|LaunchAgents|launchctl|\.git/hooks|"
+            r"post-checkout|pre-commit|\"(?:postinstall|preinstall|prepare)\"\s*:|"
+            r"'(?:postinstall|preinstall|prepare)'\s*:)",
+            re.I,
+        ),
         "Remove persistence behavior from the skill or document and isolate it as a separate explicit setup step.",
     ),
     (
@@ -155,7 +170,7 @@ PATTERNS: list[tuple[str, str, str, re.Pattern[str], str]] = [
         "external-url",
         "References external URL",
         re.compile(r"https?://[^\s)>'\"]+", re.I),
-        "Verify the domain, maintainer context, and whether the URL is documentation, download, or exfiltration.",
+        "Verify the domain and whether the URL is documentation, download, or outbound data transfer before installation.",
     ),
     (
         "LOW",
@@ -221,22 +236,57 @@ def read_text(path: Path, max_bytes: int) -> str | None:
         return data.decode("utf-8", errors="replace")
 
 
+def is_known_documentation_url(value: str) -> bool:
+    """Return whether a URL is a conservative match for a well-known docs site."""
+    parsed = urlparse(value)
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    path_prefixes = KNOWN_DOCUMENTATION_PATH_PREFIXES.get(parsed.hostname or "")
+    return bool(
+        parsed.scheme == "https"
+        and path_prefixes
+        and any(
+            prefix == "/" or parsed.path == prefix or parsed.path.startswith(f"{prefix}/")
+            for prefix in path_prefixes
+        )
+        and parsed.username is None
+        and parsed.password is None
+        and port is None
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
 def add_findings_for_text(path: Path, root: Path, text: str, findings: list[Finding]) -> None:
     for line_no, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
         if not stripped:
             continue
         for severity, category, title, pattern, recommendation in PATTERNS:
-            if pattern.search(stripped):
+            matches = pattern.finditer(stripped) if category == "external-url" else (pattern.search(stripped),)
+            for match in matches:
+                if match is None:
+                    continue
+                finding_severity = severity
+                finding_title = title
+                finding_recommendation = recommendation
+                if category == "external-url" and is_known_documentation_url(match.group(0)):
+                    finding_severity = "LOW"
+                    finding_title = "References known documentation URL"
+                    finding_recommendation = (
+                        "Confirm the link is relevant documentation. This conservative docs-only exception does not apply to downloads, APIs, or other hosts."
+                    )
                 findings.append(
                     Finding(
-                        severity=severity,
+                        severity=finding_severity,
                         category=category,
                         path=rel(path, root),
                         line=line_no,
-                        title=title,
+                        title=finding_title,
                         evidence=stripped[:240],
-                        recommendation=recommendation,
+                        recommendation=finding_recommendation,
                     )
                 )
 
@@ -798,13 +848,84 @@ def gate_for_findings(findings: list[Finding]) -> str:
     return "ALLOW"
 
 
+GATE_ACTIONS = {
+    "BLOCK": "Do not install. Keep the candidate quarantined until every CRITICAL and HIGH signal is resolved.",
+    "QUARANTINE": "Do not install yet. Verify the flagged conditions and provenance before promoting the candidate.",
+    "ALLOW WITH CONDITIONS": "Install only after reviewing the listed conditions and confirming they match the intended behavior.",
+    "ALLOW": "Static checks found no gate-triggering signals. Complete the provenance and intent review before installation.",
+}
+
+
+def location_for_finding(finding: Finding) -> str:
+    return finding.path if finding.line is None else f"{finding.path}:{finding.line}"
+
+
+def decision_for_findings(findings: list[Finding], max_signals: int = 5) -> dict[str, object]:
+    """Return a concise, deterministic explanation of the installation decision."""
+    gate = gate_for_findings(findings)
+    summary = summarize(findings)
+    if not findings:
+        reason = "No static findings were detected."
+    elif gate == "BLOCK":
+        reason = f"{summary['CRITICAL']} CRITICAL and {summary['HIGH']} HIGH signal(s) require review."
+    elif gate == "QUARANTINE":
+        reason = f"{summary['MEDIUM']} MEDIUM signal(s) require review before installation."
+    elif gate == "ALLOW":
+        reason = f"Only {summary['INFO']} informational finding(s) were recorded."
+    else:
+        reason = f"{summary['LOW']} LOW condition(s) should be reviewed before installation."
+
+    signals = []
+    seen: set[tuple[str, str, str, int | None]] = set()
+    for finding in sorted(
+        findings,
+        key=lambda item: (
+            -SEVERITY_ORDER[item.severity],
+            item.path,
+            item.line or 0,
+            item.category,
+            item.title,
+        ),
+    ):
+        if len(signals) >= max_signals:
+            break
+        key = (finding.severity, finding.category, finding.path, finding.line)
+        if key in seen:
+            continue
+        seen.add(key)
+        signals.append(
+            {
+                "severity": finding.severity,
+                "category": finding.category,
+                "title": finding.title,
+                "location": location_for_finding(finding),
+            }
+        )
+
+    return {
+        "gate": gate,
+        "reason": reason,
+        "recommended_action": GATE_ACTIONS[gate],
+        "signals": signals,
+    }
+
+
 def print_text_report(root: Path, findings: list[Finding]) -> None:
     counts = summarize(findings)
-    gate = gate_for_findings(findings)
+    decision = decision_for_findings(findings)
 
     print(f"Target: {root}")
-    print(f"Gate: {gate}")
+    print(f"Gate: {decision['gate']}")
     print("Findings: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
+    print(f"Decision: {decision['reason']}")
+    print(f"Next action: {decision['recommended_action']}")
+    if decision["signals"]:
+        print("Top signals:")
+        for signal in decision["signals"]:
+            print(
+                f"  - [{signal['severity']}] {signal['title']} "
+                f"({signal['category']} at {signal['location']})"
+            )
     print()
 
     if not findings:
@@ -859,6 +980,7 @@ def main() -> int:
                     "target": str(root),
                     "gate": gate_for_findings(findings),
                     "summary": summarize(findings),
+                    "decision": decision_for_findings(findings),
                     "findings": [asdict(finding) for finding in findings],
                 },
                 indent=2,
