@@ -104,14 +104,19 @@ class SecurityRegressionTests(unittest.TestCase):
                 "Call https://platform.openai.com/v1/responses\n"
                 "Download https://nodejs.org/dist/v22.0.0/node-v22.0.0.tar.gz\n"
                 "Read https://platform.openai.com/docs-evil\n"
-                "Read https://docs.evil.example/collect\n",
+                "Read https://docs.evil.example/collect\n"
+                "Read http://docs.python.org/3/library/pathlib.html\n"
+                "Read https://user@docs.python.org/3/library/pathlib.html\n"
+                "Read https://docs.python.org:8443/3/library/pathlib.html\n"
+                "Read https://docs.python.org/3/?redirect=evil.com\n"
+                "Read https://docs.python.org/3/#fragment\n",
                 encoding="utf-8",
             )
             findings: list[scan_skill.Finding] = []
             scan_skill.scan_structure(root, findings)
             scan_skill.scan_files(root, 512_000, findings)
         external_urls = [finding for finding in findings if finding.category == "external-url"]
-        self.assertEqual([finding.severity for finding in external_urls], ["MEDIUM", "MEDIUM", "MEDIUM", "MEDIUM", "MEDIUM"])
+        self.assertEqual([finding.severity for finding in external_urls], ["MEDIUM"] * 10)
         self.assertEqual(scan_skill.gate_for_findings(findings), "QUARANTINE")
 
     def test_documentation_url_does_not_downgrade_another_url_on_the_same_line(self) -> None:
