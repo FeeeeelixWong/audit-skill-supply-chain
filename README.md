@@ -51,6 +51,18 @@ Scan a local untrusted skill:
 python3 skills/audit-skill-supply-chain/scripts/audit_skill.py scan /path/to/untrusted-skill
 ```
 
+The scan starts with a concise, actionable decision before the detailed evidence:
+
+```text
+Gate: BLOCK
+Decision: 0 CRITICAL and 2 HIGH signal(s) require review.
+Next action: Do not install. Keep the candidate quarantined until every CRITICAL and HIGH signal is resolved.
+Top signals:
+  - [HIGH] Uses dynamic code execution (code-execution at scripts/setup.py:18)
+```
+
+Use `--json` when the result will feed CI or another tool. The JSON result includes the same `decision.reason`, `decision.recommended_action`, and highest-priority `decision.signals`, so automation can explain a failure without parsing terminal text.
+
 Scan a GitHub-sourced skill with provenance checks:
 
 ```bash
@@ -148,7 +160,7 @@ python3 ~/.codex/skills/audit-skill-supply-chain/scripts/audit_skill.py baseline
 2. **Verify provenance**: require a full commit SHA or a verified release checksum.
 3. **Run static scanning**: inspect manifests, scripts, references, assets, symlinks, hidden files, URLs, and high-risk phrases.
 4. **Review privacy and money flows**: check whether the skill can access private data, credentials, wallets, payment systems, or production systems.
-5. **Decide the install gate**: return `BLOCK`, `QUARANTINE`, `ALLOW WITH CONDITIONS`, or `ALLOW`. An `ALLOW WITH CONDITIONS` install requires `--allow-conditions` only after the user explicitly approves every privacy- or money-sensitive condition.
+5. **Decide the install gate**: read the scanner's `Decision`, `Next action`, and highest-priority signals, then return `BLOCK`, `QUARANTINE`, `ALLOW WITH CONDITIONS`, or `ALLOW`. An `ALLOW WITH CONDITIONS` install requires `--allow-conditions` only after the user explicitly approves every privacy- or money-sensitive condition.
 6. **Promote exact artifact only**: if allowed, promote the same private staging copy into the live install path and record its tree hash.
 7. **Recheck before later trust**: run `audit_skill.py verify` after an update or suspected local modification; changed content returns `QUARANTINE`.
 
@@ -264,6 +276,18 @@ python3 skills/audit-skill-supply-chain/scripts/audit_skill.py baseline \
 python3 skills/audit-skill-supply-chain/scripts/audit_skill.py scan /path/to/untrusted-skill
 ```
 
+扫描结果会先给出可执行的结论，再列出完整证据：
+
+```text
+Gate: BLOCK
+Decision: 0 CRITICAL and 2 HIGH signal(s) require review.
+Next action: Do not install. Keep the candidate quarantined until every CRITICAL and HIGH signal is resolved.
+Top signals:
+  - [HIGH] Uses dynamic code execution (code-execution at scripts/setup.py:18)
+```
+
+需要接入 CI 或其他工具时使用 `--json`。JSON 会提供同样的 `decision.reason`、`decision.recommended_action` 和最高优先级的 `decision.signals`，无需再解析终端文本。
+
 扫描来自 GitHub 的 skill，并检查来源：
 
 ```bash
@@ -361,7 +385,7 @@ python3 ~/.codex/skills/audit-skill-supply-chain/scripts/audit_skill.py baseline
 2. **验证来源**：要求完整 commit SHA 或已验证 release checksum。
 3. **运行静态扫描**：检查 manifest、脚本、参考文件、资产、符号链接、隐藏文件、URL 和高风险语句。
 4. **审查隐私和资金路径**：确认 skill 是否能访问私有数据、凭据、钱包、支付系统或生产系统。
-5. **给出安装闸门结论**：返回 `BLOCK`、`QUARANTINE`、`ALLOW WITH CONDITIONS` 或 `ALLOW`。对于 `ALLOW WITH CONDITIONS`，必须在用户明确同意每一项隐私或资金敏感条件后，才可使用 `--allow-conditions` 安装。
+5. **给出安装闸门结论**：先阅读扫描器输出的 `Decision`、`Next action` 与最高优先级信号，再返回 `BLOCK`、`QUARANTINE`、`ALLOW WITH CONDITIONS` 或 `ALLOW`。对于 `ALLOW WITH CONDITIONS`，必须在用户明确同意每一项隐私或资金敏感条件后，才可使用 `--allow-conditions` 安装。
 6. **只提升已审查产物**：如果允许安装，只提升私有暂存中的同一份已审查 skill，并记录它的树哈希。
 7. **后续信任前复核**：更新后或怀疑本地内容被改动时运行 `audit_skill.py verify`；发生漂移即返回 `QUARANTINE`。
 

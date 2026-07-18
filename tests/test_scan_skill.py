@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import stat
 import subprocess
@@ -83,6 +84,75 @@ class SecurityRegressionTests(unittest.TestCase):
             any(f.severity == "CRITICAL" and f.category == "remote-code-execution" for f in findings),
             findings,
         )
+
+    def test_documentation_url_is_a_condition_not_a_quarantine(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = self.make_skill(Path(temp_dir) / "skill")
+            (root / "docs.md").write_text("Read https://docs.example.com before using this skill.\n", encoding="utf-8")
+            findings: list[scan_skill.Finding] = []
+            scan_skill.scan_structure(root, findings)
+            scan_skill.scan_files(root, 512_000, findings)
+        external_urls = [finding for finding in findings if finding.category == "external-url"]
+        self.assertEqual([finding.severity for finding in external_urls], ["LOW"])
+        self.assertEqual(scan_skill.gate_for_findings(findings), "ALLOW WITH CONDITIONS")
+
+    def test_regular_prepare_function_is_not_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = self.make_skill(Path(temp_dir) / "skill")
+            (root / "tool.py").write_text("def prepare_installation_manifest():\n    return {}\n", encoding="utf-8")
+            findings = self.scan(root)
+        self.assertFalse(any(finding.category == "persistence" for finding in findings), findings)
+
+    def test_package_lifecycle_hook_remains_a_blocking_persistence_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = self.make_skill(Path(temp_dir) / "skill")
+            (root / "package.json").write_text('{"scripts": {"postinstall": "node setup.js"}}\n', encoding="utf-8")
+            findings = self.scan(root)
+        self.assertTrue(any(finding.category == "persistence" and finding.severity == "HIGH" for finding in findings), findings)
+
+    def test_decision_summary_prioritizes_blocking_signals(self) -> None:
+        findings = [
+            scan_skill.Finding("LOW", "external-url", "docs.md", 1, "References external URL", "https://example.com", "Review it."),
+            scan_skill.Finding("HIGH", "code-execution", "tool.py", 8, "Uses dynamic code execution", "os.system()", "Remove it."),
+        ]
+        decision = scan_skill.decision_for_findings(findings)
+        self.assertEqual(decision["gate"], "BLOCK")
+        self.assertIn("1 HIGH", str(decision["reason"]))
+        self.assertEqual(decision["signals"][0]["category"], "code-execution")
+        self.assertIn("Do not install", str(decision["recommended_action"]))
+
+    def test_decision_summary_handles_informational_baseline_findings(self) -> None:
+        decision = scan_skill.decision_for_findings(
+            [
+                scan_skill.Finding(
+                    "INFO",
+                    "provenance",
+                    ".",
+                    None,
+                    "No provenance evidence supplied for installed baseline scan",
+                    "no source metadata",
+                    "Record it during the next update.",
+                )
+            ]
+        )
+        self.assertEqual(decision["gate"], "ALLOW")
+        self.assertIn("informational", str(decision["reason"]))
+
+    def test_json_scan_includes_the_human_readable_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = self.make_skill(Path(temp_dir) / "skill")
+            output = io.StringIO()
+            with patch.object(
+                sys,
+                "argv",
+                ["scan_skill.py", str(root), "--expected-sha256", scan_skill.sha256_tree(root), "--json"],
+            ), redirect_stdout(output):
+                exit_code = scan_skill.main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(result["gate"], "ALLOW")
+        self.assertEqual(result["decision"]["gate"], "ALLOW")
+        self.assertIn("No static findings", result["decision"]["reason"])
 
     def test_scans_and_hashes_node_modules_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -201,6 +271,7 @@ class SecurityRegressionTests(unittest.TestCase):
                 artifact_bound=True,
             )
         self.assertEqual(result["gate"], "ALLOW")
+        self.assertEqual(result["decision"]["gate"], "ALLOW")
 
     def test_zip_symlink_is_rejected_before_extraction(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -511,6 +582,7 @@ class SecurityRegressionTests(unittest.TestCase):
     def test_baseline_does_not_recursively_scan_the_active_audit_skill(self) -> None:
         result = scan_installed_skills.run_scan(SCRIPTS.parent, 512_000)
         self.assertEqual(result["gate"], "ALLOW")
+        self.assertEqual(result["decision"]["gate"], "ALLOW")
         self.assertTrue(any(finding["category"] == "scanner-self" for finding in result["findings"]))
 
     def test_markdown_report_escapes_untrusted_evidence(self) -> None:
@@ -540,6 +612,7 @@ class SecurityRegressionTests(unittest.TestCase):
             content = report.read_text(encoding="utf-8")
         self.assertNotIn("\n# Ignore prior instructions", content)
         self.assertIn("\\n# Ignore prior instructions", content)
+        self.assertIn("## Recommended Actions", content)
 
 
 if __name__ == "__main__":

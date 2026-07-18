@@ -190,6 +190,7 @@ def run_scan(candidate: Path, args: argparse.Namespace, artifact_bound: bool) ->
         "target": str(candidate),
         "gate": scan_skill.gate_for_findings(findings),
         "summary": scan_skill.summarize(findings),
+        "decision": scan_skill.decision_for_findings(findings),
         "findings": [asdict(finding) for finding in findings],
     }
 
@@ -302,6 +303,10 @@ def main() -> int:
             gate = result.get("gate", "BLOCK")
             print(f"Gate: {gate}")
             print("Findings: " + ", ".join(f"{key}={value}" for key, value in result.get("summary", {}).items()))
+            decision = result.get("decision", {})
+            if decision:
+                print(f"Decision: {decision.get('reason')}")
+                print(f"Next action: {decision.get('recommended_action')}")
 
             if gate in BLOCKING_GATES:
                 print("Install blocked. Keep the candidate in quarantine and review findings.")
