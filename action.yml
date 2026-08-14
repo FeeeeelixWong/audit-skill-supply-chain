@@ -12,7 +12,7 @@ inputs:
     required: false
     default: .
   source-url:
-    description: Approved canonical GitHub repository URL. Defaults to the current GitHub repository.
+    description: Approved canonical GitHub.com repository URL. Defaults to the current repository on GitHub.com.
     required: false
     default: ""
   expected-commit:

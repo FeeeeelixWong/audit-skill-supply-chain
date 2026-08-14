@@ -13,9 +13,12 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
+import subprocess
 import sys
 import tempfile
+import unicodedata
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable
@@ -383,6 +386,71 @@ def find_git_dir(root: Path) -> Path | None:
     return None
 
 
+def run_readonly_git(checkout: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run a non-mutating Git query without inherited Git configuration."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    return subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-C",
+            str(checkout),
+            *arguments,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        env=environment,
+    )
+
+
+def verify_git_target_at_head(checkout: Path, root: Path) -> tuple[bool, str]:
+    """Confirm every scanned target file is tracked and unchanged at HEAD."""
+    try:
+        pathspec = root.relative_to(checkout).as_posix() or "."
+    except ValueError:
+        return False, "target is outside the discovered Git checkout"
+
+    try:
+        tracked = run_readonly_git(checkout, "ls-tree", "-r", "--name-only", "HEAD", "--", pathspec)
+        if tracked.returncode != 0:
+            return False, f"git ls-tree failed: {tracked.stderr.strip() or 'unknown error'}"
+        if not tracked.stdout.strip():
+            return False, f"target path is not tracked at HEAD: {pathspec}"
+
+        status = run_readonly_git(
+            checkout,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            pathspec,
+        )
+        if status.returncode != 0:
+            return False, f"git status failed: {status.stderr.strip() or 'unknown error'}"
+        if status.stdout.strip():
+            return False, f"target differs from HEAD:\n{status.stdout.strip()[:2_000]}"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"could not verify target against Git index: {exc}"
+    return True, ""
+
+
 def read_origin_url(git_dir: Path) -> str | None:
     config_path = git_dir / "config"
     if not config_path.exists():
@@ -567,6 +635,7 @@ def scan_provenance(root: Path, args: argparse.Namespace, findings: list[Finding
         else:
             integrity_verified = True
 
+    checkout = find_git_checkout(root)
     git_dir = find_git_dir(root)
     if git_dir:
         origin_url = read_origin_url(git_dir)
@@ -609,7 +678,21 @@ def scan_provenance(root: Path, args: argparse.Namespace, findings: list[Finding
                     "Use a normal Git checkout or verified release checksum before installation.",
                 )
             else:
-                integrity_verified = True
+                target_matches_head, target_evidence = (
+                    verify_git_target_at_head(checkout, root)
+                    if checkout is not None
+                    else (False, "could not locate the checkout work tree")
+                )
+                if target_matches_head:
+                    integrity_verified = True
+                else:
+                    add_provenance_finding(
+                        findings,
+                        "HIGH",
+                        "Target content is not tracked and clean at the approved commit",
+                        target_evidence,
+                        "Reject modified, untracked, or ignored content and scan a clean checkout of the approved commit.",
+                    )
         elif origin_slug:
             add_provenance_finding(
                 findings,
@@ -945,35 +1028,22 @@ def build_scan_report(root: Path, findings: list[Finding]) -> dict[str, object]:
 
 
 def sanitize_report_text(value: object, limit: int = 2_000) -> str:
-    """Make untrusted evidence readable without terminal or bidi control characters."""
-    bidi_controls = {
-        "\u061c",
-        "\u200e",
-        "\u200f",
-        "\u202a",
-        "\u202b",
-        "\u202c",
-        "\u202d",
-        "\u202e",
-        "\u2066",
-        "\u2067",
-        "\u2068",
-        "\u2069",
-    }
+    """Make untrusted evidence readable without control or invisible formatting characters."""
     rendered: list[str] = []
     rendered_length = 0
     for character in str(value):
         codepoint = ord(character)
-        if codepoint < 32 or codepoint == 127 or character in bidi_controls:
-            part = f"\\u{codepoint:04x}"
+        if unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}:
+            part = f"\\u{codepoint:04x}" if codepoint <= 0xFFFF else f"\\U{codepoint:08x}"
         else:
             part = character
+        if rendered_length + len(part) > limit:
+            if limit - rendered_length >= 3:
+                rendered.append("...")
+            break
         rendered.append(part)
         rendered_length += len(part)
-        if rendered_length >= limit:
-            break
-    text = "".join(rendered)
-    return text if len(text) <= limit else text[: limit - 3] + "..."
+    return "".join(rendered)
 
 
 def sarif_rule_id(finding: Finding) -> str:
@@ -991,14 +1061,7 @@ def sarif_artifact_uri(path: str) -> str:
     return quote("/".join(parts) or ".", safe="/._-")
 
 
-def sarif_location(root: Path, finding: Finding) -> str:
-    checkout = find_git_checkout(root)
-    prefix = ""
-    if checkout is not None:
-        try:
-            prefix = root.relative_to(checkout).as_posix()
-        except ValueError:
-            prefix = ""
+def sarif_location(prefix: str, finding: Finding) -> str:
     finding_path = "SKILL.md" if finding.path == "." else finding.path
     return "/".join(part for part in (prefix, finding_path) if part and part != ".") or "SKILL.md"
 
@@ -1015,6 +1078,13 @@ def build_sarif_report(root: Path, findings: list[Finding]) -> dict[str, object]
     rules: dict[str, dict[str, object]] = {}
     results: list[dict[str, object]] = []
     gate = gate_for_findings(findings)
+    checkout = find_git_checkout(root)
+    prefix = ""
+    if checkout is not None:
+        try:
+            prefix = root.relative_to(checkout).as_posix()
+        except ValueError:
+            prefix = ""
 
     for finding in sorted(
         findings,
@@ -1033,7 +1103,7 @@ def build_sarif_report(root: Path, findings: list[Finding]) -> dict[str, object]
             },
         )
         physical_location: dict[str, object] = {
-            "artifactLocation": {"uri": sarif_artifact_uri(sarif_location(root, finding)), "uriBaseId": "%SRCROOT%"}
+            "artifactLocation": {"uri": sarif_artifact_uri(sarif_location(prefix, finding))}
         }
         if finding.line is not None and finding.line > 0:
             physical_location["region"] = {"startLine": finding.line}
@@ -1053,7 +1123,6 @@ def build_sarif_report(root: Path, findings: list[Finding]) -> dict[str, object]
                     "severity": finding.severity,
                     "category": finding.category,
                     "gate": gate,
-                    "evidence": sanitize_report_text(finding.evidence),
                 },
             }
         )
@@ -1080,28 +1149,88 @@ def build_sarif_report(root: Path, findings: list[Finding]) -> dict[str, object]
     }
 
 
-def write_json_file(path: Path, payload: object) -> Path:
-    """Atomically write a private report and refuse a symlink destination."""
+def open_private_parent(path: Path) -> tuple[Path, int]:
+    """Open or create a report parent without following any symlink component."""
     destination = path.expanduser().absolute()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.is_symlink():
-        raise ValueError(f"refusing to write report through symlink: {destination}")
-
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
-    temporary = Path(temporary_name)
+    temp_root = Path(tempfile.gettempdir()).expanduser().absolute()
     try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        os.replace(temporary, destination)
-    except Exception:
-        try:
+        destination = temp_root.resolve(strict=True) / destination.relative_to(temp_root)
+    except (OSError, ValueError):
+        pass
+    if not destination.name:
+        raise ValueError("report destination must name a file")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(destination.anchor, flags)
+    try:
+        for component in destination.parent.parts[1:]:
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
             os.close(descriptor)
+            descriptor = next_descriptor
+    except OSError as exc:
+        os.close(descriptor)
+        raise ValueError(f"refusing report path with a symlink or non-directory parent: {destination}") from exc
+    return destination, descriptor
+
+
+def write_json_file(path: Path, payload: object) -> Path:
+    """Atomically write a mode-0600 report without following symlink path components."""
+    destination, parent_descriptor = open_private_parent(path)
+    try:
+        try:
+            existing = os.stat(destination.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and stat.S_ISLNK(existing.st_mode):
+            raise ValueError(f"refusing to write report through symlink: {destination}")
+
+        temporary_name = ""
+        descriptor: int | None = None
+        for _ in range(100):
+            temporary_name = f".{destination.name}.{secrets.token_hex(12)}"
+            try:
+                descriptor = os.open(
+                    temporary_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    mode=0o600,
+                    dir_fd=parent_descriptor,
+                )
+                break
+            except FileExistsError:
+                continue
+        if descriptor is None:
+            raise OSError("could not allocate a private temporary report")
+
+        try:
+            handle = os.fdopen(descriptor, "w", encoding="utf-8")
+            descriptor = None
+            with handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(
+                temporary_name,
+                destination.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+        except Exception:
+            if descriptor is not None:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+            raise
+    finally:
+        try:
+            os.close(parent_descriptor)
         except OSError:
             pass
-        temporary.unlink(missing_ok=True)
-        raise
     return destination
 
 

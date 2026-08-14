@@ -67,13 +67,15 @@ Use `--json` when the result will feed CI or another tool. The JSON result inclu
 Write JSON and SARIF reports without changing terminal output:
 
 ```bash
+report_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-skill-audit.XXXXXX")"
+chmod 700 "$report_dir"
 python3 skills/audit-skill-supply-chain/scripts/audit_skill.py scan /path/to/untrusted-skill \
-  --json-output /tmp/agent-skill-audit.json \
-  --sarif-output /tmp/agent-skill-audit.sarif \
+  --json-output "$report_dir/report.json" \
+  --sarif-output "$report_dir/report.sarif" \
   --fail-on medium
 ```
 
-The repository also ships a reusable GitHub Action. Pin it to a reviewed full commit SHA, point `target` at the skill directory, and upload its `sarif` output to GitHub code scanning. The default `fail-on: quarantine` fails `BLOCK` and `QUARANTINE` decisions while preserving both reports. See the [GitHub Action security gate guide](docs/github-action.md) and [copyable workflow](.github/examples/audit-agent-skill.yml).
+The repository also ships a reusable GitHub Action. Pin it to a reviewed full commit SHA, point `target` at the skill directory, and upload its redacted `sarif` output to GitHub code scanning. The default `fail-on: quarantine` writes both reports before failing `BLOCK` or `QUARANTINE`; the example retains detailed JSON evidence as an artifact for three days. See the [GitHub Action security gate guide](docs/github-action.md) and [copyable workflow](.github/examples/audit-agent-skill.yml).
 
 Scan a GitHub-sourced skill with provenance checks:
 
@@ -308,13 +310,15 @@ Top signals:
 在不改变终端输出的情况下写入 JSON 与 SARIF 报告：
 
 ```bash
+report_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-skill-audit.XXXXXX")"
+chmod 700 "$report_dir"
 python3 skills/audit-skill-supply-chain/scripts/audit_skill.py scan /path/to/untrusted-skill \
-  --json-output /tmp/agent-skill-audit.json \
-  --sarif-output /tmp/agent-skill-audit.sarif \
+  --json-output "$report_dir/report.json" \
+  --sarif-output "$report_dir/report.sarif" \
   --fail-on medium
 ```
 
-本仓库还提供可复用的 GitHub Action。接入时应固定到已审查的完整 commit SHA，把 `target` 指向实际 skill 目录，并将 `sarif` 输出上传到 GitHub code scanning。默认 `fail-on: quarantine` 会在结果为 `BLOCK` 或 `QUARANTINE` 时失败，同时保留两种报告。具体参见 [GitHub Action 安全闸门指南](docs/github-action.md) 和 [可复制 workflow](.github/examples/audit-agent-skill.yml)。
+本仓库还提供可复用的 GitHub Action。接入时应固定到已审查的完整 commit SHA，把 `target` 指向实际 skill 目录，并将不含原始证据的 `sarif` 输出上传到 GitHub code scanning。默认 `fail-on: quarantine` 会先生成两种报告，再在结果为 `BLOCK` 或 `QUARANTINE` 时失败；示例会将详细 JSON 作为 artifact 保留 3 天。具体参见 [GitHub Action 安全闸门指南](docs/github-action.md) 和 [可复制 workflow](.github/examples/audit-agent-skill.yml)。
 
 扫描来自 GitHub 的 skill，并检查来源：
 

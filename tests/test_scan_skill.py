@@ -39,6 +39,19 @@ class SecurityRegressionTests(unittest.TestCase):
         (root / "LICENSE").write_text("MIT\n", encoding="utf-8")
         return root
 
+    def commit_repo(self, root: Path, remote: str = "https://github.com/owner/repo.git") -> str:
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "remote", "add", "origin", remote], cwd=root, check=True)
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"],
+            cwd=root,
+            check=True,
+        )
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
     def scan(self, root: Path, max_bytes: int = 512_000) -> list[scan_skill.Finding]:
         findings: list[scan_skill.Finding] = []
         args = Namespace(
@@ -222,22 +235,28 @@ class SecurityRegressionTests(unittest.TestCase):
             "scripts/setup%20file.py",
         )
         self.assertEqual(result["locations"][0]["physicalLocation"]["region"]["startLine"], 8)
-        self.assertIn("\\\\u000a", serialized)
-        self.assertIn("\\\\u202e", serialized)
-        self.assertNotIn(str(Path.cwd().resolve()), serialized)
+        self.assertNotIn(str(Path("/isolated/skill")), serialized)
+        self.assertNotIn("os.system('unsafe')", serialized)
+        self.assertNotIn("uriBaseId", serialized)
+
+    def test_report_text_escapes_c1_and_invisible_unicode_controls(self) -> None:
+        rendered = scan_skill.sanitize_report_text("a\u0085\u00ad\u200b\u2028\U000e0001z")
+        self.assertEqual(rendered, "a\\u0085\\u00ad\\u200b\\u2028\\U000e0001z")
+
+    def test_sarif_resolves_checkout_once_per_report(self) -> None:
+        findings = [
+            scan_skill.Finding("LOW", "one", "one.py", 1, "One", "evidence", "Review."),
+            scan_skill.Finding("LOW", "two", "two.py", 2, "Two", "evidence", "Review."),
+        ]
+        with patch.object(scan_skill, "find_git_checkout", return_value=None) as find_checkout:
+            scan_skill.build_sarif_report(Path("/isolated/skill"), findings)
+        find_checkout.assert_called_once_with(Path("/isolated/skill"))
 
     def test_nested_skill_uses_parent_checkout_for_provenance_and_sarif_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir) / "repo"
             skill = self.make_skill(repo / "skills" / "example")
-            git_dir = repo / ".git"
-            git_dir.mkdir()
-            commit = "a" * 40
-            (git_dir / "HEAD").write_text(commit + "\n", encoding="utf-8")
-            (git_dir / "config").write_text(
-                '[remote "origin"]\n\turl = https://github.com/owner/repo.git\n',
-                encoding="utf-8",
-            )
+            commit = self.commit_repo(repo)
             findings: list[scan_skill.Finding] = []
             scan_skill.scan_provenance(
                 skill,
@@ -260,6 +279,56 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(
             sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
             "skills/example/scripts/tool.py",
+        )
+
+    def test_untracked_nested_skill_is_not_granted_commit_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("tracked\n", encoding="utf-8")
+            commit = self.commit_repo(repo)
+            skill = self.make_skill(repo / "skills" / "untracked")
+            findings: list[scan_skill.Finding] = []
+            scan_skill.scan_provenance(
+                skill,
+                Namespace(
+                    source_url="https://github.com/owner/repo",
+                    expected_commit=commit,
+                    artifact=None,
+                    expected_sha256=None,
+                    installed_baseline=False,
+                    artifact_bound=False,
+                ),
+                findings,
+            )
+        self.assertTrue(
+            any(f.title == "Target content is not tracked and clean at the approved commit" for f in findings),
+            findings,
+        )
+        self.assertEqual(scan_skill.gate_for_findings(findings), "BLOCK")
+
+    def test_modified_nested_skill_is_not_granted_commit_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            skill = self.make_skill(repo / "skills" / "example")
+            commit = self.commit_repo(repo)
+            (skill / "SKILL.md").write_text("changed after commit\n", encoding="utf-8")
+            findings: list[scan_skill.Finding] = []
+            scan_skill.scan_provenance(
+                skill,
+                Namespace(
+                    source_url="https://github.com/owner/repo",
+                    expected_commit=commit,
+                    artifact=None,
+                    expected_sha256=None,
+                    installed_baseline=False,
+                    artifact_bound=False,
+                ),
+                findings,
+            )
+        self.assertTrue(
+            any(f.title == "Target content is not tracked and clean at the approved commit" for f in findings),
+            findings,
         )
 
     def test_cli_writes_json_and_sarif_before_enforcing_threshold(self) -> None:
@@ -307,6 +376,28 @@ class SecurityRegressionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symlink"):
                 scan_skill.write_json_file(report, {"changed": True})
             self.assertEqual(protected.read_text(encoding="utf-8"), '{"unchanged": true}\n')
+
+    def test_report_writer_rejects_symlink_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            protected = temp / "protected"
+            protected.mkdir()
+            linked_parent = temp / "linked"
+            try:
+                os.symlink(protected, linked_parent)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                scan_skill.write_json_file(linked_parent / "report.json", {"changed": True})
+            self.assertFalse((protected / "report.json").exists())
+
+    def test_report_writer_cleans_up_when_atomic_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = Path(temp_dir) / "reports" / "report.json"
+            with patch.object(scan_skill.os, "replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    scan_skill.write_json_file(report, {"gate": "ALLOW"})
+            self.assertEqual(list(report.parent.glob(".report.json.*")), [])
 
     def test_summary_only_terminal_report_does_not_print_evidence(self) -> None:
         output = io.StringIO()
