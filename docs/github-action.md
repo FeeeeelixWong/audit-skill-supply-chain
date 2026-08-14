@@ -4,7 +4,7 @@ The root `action.yml` turns Audit Skill Supply Chain into a reusable composite G
 
 ## Minimal workflow
 
-Pin this action to a reviewed full commit SHA. Replace `path/to/skill` and `<AUDIT_ACTION_COMMIT_SHA>` before use.
+The workflow below pins the Action to a reviewed full commit SHA. Replace `path/to/skill` before use, and update the pin only after reviewing a newer immutable revision.
 
 ```yaml
 name: Audit agent skill
@@ -29,7 +29,7 @@ jobs:
 
       - name: Audit agent skill
         id: skill-audit
-        uses: FeeeeelixWong/audit-skill-supply-chain@<AUDIT_ACTION_COMMIT_SHA>
+        uses: FeeeeelixWong/audit-skill-supply-chain@7ec39b8496ef08b2aa778a91f723e6c4450915f9
         with:
           target: path/to/skill
           fail-on: quarantine
