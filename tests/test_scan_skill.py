@@ -39,6 +39,36 @@ class SecurityRegressionTests(unittest.TestCase):
         (root / "LICENSE").write_text("MIT\n", encoding="utf-8")
         return root
 
+    def commit_repo(self, root: Path, remote: str = "https://github.com/owner/repo.git") -> str:
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        environment.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+
+        def git(*arguments: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *arguments],
+                cwd=root,
+                check=True,
+                env=environment,
+                capture_output=capture,
+                text=True,
+            )
+
+        git("init", "-q")
+        git("remote", "add", "origin", remote)
+        git("add", ".")
+        git(
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "fixture",
+        )
+        return git("rev-parse", "HEAD", capture=True).stdout.strip()
+
     def scan(self, root: Path, max_bytes: int = 512_000) -> list[scan_skill.Finding]:
         findings: list[scan_skill.Finding] = []
         args = Namespace(
@@ -198,6 +228,267 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(result["gate"], "ALLOW")
         self.assertEqual(result["decision"]["gate"], "ALLOW")
         self.assertIn("No static findings", result["decision"]["reason"])
+
+    def test_sarif_report_maps_findings_without_exposing_absolute_target(self) -> None:
+        finding = scan_skill.Finding(
+            "HIGH",
+            "code-execution",
+            "scripts/setup file.py",
+            8,
+            "Uses dynamic code execution",
+            "os.system('unsafe')\n\u202e",
+            "Replace dynamic execution with a structured API.",
+        )
+        sarif = scan_skill.build_sarif_report(Path("/isolated/skill"), [finding])
+        serialized = json.dumps(sarif)
+        run = sarif["runs"][0]
+        result = run["results"][0]
+
+        self.assertEqual(sarif["version"], "2.1.0")
+        self.assertEqual(run["properties"]["gate"], "BLOCK")
+        self.assertEqual(result["level"], "error")
+        self.assertEqual(
+            result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "scripts/setup%20file.py",
+        )
+        self.assertEqual(result["locations"][0]["physicalLocation"]["region"]["startLine"], 8)
+        self.assertNotIn(str(Path("/isolated/skill")), serialized)
+        self.assertNotIn("os.system('unsafe')", serialized)
+        self.assertNotIn("uriBaseId", serialized)
+
+    def test_report_text_escapes_c1_and_invisible_unicode_controls(self) -> None:
+        rendered = scan_skill.sanitize_report_text("a\u0085\u00ad\u200b\u2028\U000e0001z")
+        self.assertEqual(rendered, "a\\u0085\\u00ad\\u200b\\u2028\\U000e0001z")
+
+    def test_sarif_resolves_checkout_once_per_report(self) -> None:
+        findings = [
+            scan_skill.Finding("LOW", "one", "one.py", 1, "One", "evidence", "Review."),
+            scan_skill.Finding("LOW", "two", "two.py", 2, "Two", "evidence", "Review."),
+        ]
+        with patch.object(scan_skill, "find_git_checkout", return_value=None) as find_checkout:
+            scan_skill.build_sarif_report(Path("/isolated/skill"), findings)
+        find_checkout.assert_called_once_with(Path("/isolated/skill"))
+
+    def test_nested_skill_uses_parent_checkout_for_provenance_and_sarif_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            skill = self.make_skill(repo / "skills" / "example")
+            commit = self.commit_repo(repo)
+            findings: list[scan_skill.Finding] = []
+            scan_skill.scan_provenance(
+                skill,
+                Namespace(
+                    source_url="https://github.com/owner/repo",
+                    expected_commit=commit,
+                    artifact=None,
+                    expected_sha256=None,
+                    installed_baseline=False,
+                    artifact_bound=False,
+                ),
+                findings,
+            )
+            sarif = scan_skill.build_sarif_report(
+                skill,
+                [scan_skill.Finding("HIGH", "code-execution", "scripts/tool.py", 3, "Test", "exec", "Remove it.")],
+            )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(
+            sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "skills/example/scripts/tool.py",
+        )
+
+    def test_untracked_nested_skill_is_not_granted_commit_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            repo.mkdir()
+            (repo / "README.md").write_text("tracked\n", encoding="utf-8")
+            commit = self.commit_repo(repo)
+            skill = self.make_skill(repo / "skills" / "untracked")
+            findings: list[scan_skill.Finding] = []
+            scan_skill.scan_provenance(
+                skill,
+                Namespace(
+                    source_url="https://github.com/owner/repo",
+                    expected_commit=commit,
+                    artifact=None,
+                    expected_sha256=None,
+                    installed_baseline=False,
+                    artifact_bound=False,
+                ),
+                findings,
+            )
+        self.assertTrue(
+            any(f.title == "Target content is not tracked and clean at the approved commit" for f in findings),
+            findings,
+        )
+        self.assertEqual(scan_skill.gate_for_findings(findings), "BLOCK")
+
+    def test_modified_nested_skill_is_not_granted_commit_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            skill = self.make_skill(repo / "skills" / "example")
+            commit = self.commit_repo(repo)
+            (skill / "SKILL.md").write_text("changed after commit\n", encoding="utf-8")
+            findings: list[scan_skill.Finding] = []
+            scan_skill.scan_provenance(
+                skill,
+                Namespace(
+                    source_url="https://github.com/owner/repo",
+                    expected_commit=commit,
+                    artifact=None,
+                    expected_sha256=None,
+                    installed_baseline=False,
+                    artifact_bound=False,
+                ),
+                findings,
+            )
+        self.assertTrue(
+            any(f.title == "Target content is not tracked and clean at the approved commit" for f in findings),
+            findings,
+        )
+
+    def test_git_pathspec_magic_in_target_name_cannot_bypass_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            self.make_skill(repo / "skills" / "approved")
+            commit = self.commit_repo(repo)
+            skill = self.make_skill(repo / ":(top)skills" / "approved")
+            findings: list[scan_skill.Finding] = []
+            scan_skill.scan_provenance(
+                skill,
+                Namespace(
+                    source_url="https://github.com/owner/repo",
+                    expected_commit=commit,
+                    artifact=None,
+                    expected_sha256=None,
+                    installed_baseline=False,
+                    artifact_bound=False,
+                ),
+                findings,
+            )
+        self.assertTrue(
+            any(f.title == "Target content is not tracked and clean at the approved commit" for f in findings),
+            findings,
+        )
+
+    def test_ignored_file_inside_target_blocks_commit_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            skill = self.make_skill(repo / "skills" / "example")
+            (repo / ".gitignore").write_text("secret.py\n", encoding="utf-8")
+            commit = self.commit_repo(repo)
+            (skill / "secret.py").write_text("ignored payload\n", encoding="utf-8")
+            findings: list[scan_skill.Finding] = []
+            scan_skill.scan_provenance(
+                skill,
+                Namespace(
+                    source_url="https://github.com/owner/repo",
+                    expected_commit=commit,
+                    artifact=None,
+                    expected_sha256=None,
+                    installed_baseline=False,
+                    artifact_bound=False,
+                ),
+                findings,
+            )
+        self.assertTrue(
+            any(f.title == "Target content is not tracked and clean at the approved commit" for f in findings),
+            findings,
+        )
+
+    def test_cli_writes_json_and_sarif_before_enforcing_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = self.make_skill(temp / "skill")
+            (root / "tool.py").write_text("import os\nos.system('unsafe')\n", encoding="utf-8")
+            json_report = temp / "reports" / "result.json"
+            sarif_report = temp / "reports" / "result.sarif"
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "scan_skill.py",
+                    str(root),
+                    "--expected-sha256",
+                    scan_skill.sha256_tree(root),
+                    "--json-output",
+                    str(json_report),
+                    "--sarif-output",
+                    str(sarif_report),
+                    "--fail-on",
+                    "high",
+                ],
+            ), redirect_stdout(io.StringIO()):
+                exit_code = scan_skill.main()
+
+            json_result = json.loads(json_report.read_text(encoding="utf-8"))
+            sarif_result = json.loads(sarif_report.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(json_result["gate"], "BLOCK")
+        self.assertEqual(sarif_result["runs"][0]["properties"]["gate"], "BLOCK")
+
+    def test_report_writer_rejects_symlink_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            protected = temp / "protected.json"
+            protected.write_text('{"unchanged": true}\n', encoding="utf-8")
+            report = temp / "report.json"
+            try:
+                os.symlink(protected, report)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                scan_skill.write_json_file(report, {"changed": True})
+            self.assertEqual(protected.read_text(encoding="utf-8"), '{"unchanged": true}\n')
+
+    def test_report_writer_rejects_symlink_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            protected = temp / "protected"
+            protected.mkdir()
+            linked_parent = temp / "linked"
+            try:
+                os.symlink(protected, linked_parent)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                scan_skill.write_json_file(linked_parent / "report.json", {"changed": True})
+            self.assertFalse((protected / "report.json").exists())
+
+    def test_report_writer_cleans_up_when_atomic_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = Path(temp_dir) / "reports" / "report.json"
+            with patch.object(scan_skill.os, "replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    scan_skill.write_json_file(report, {"gate": "ALLOW"})
+            self.assertEqual(list(report.parent.glob(".report.json.*")), [])
+
+    def test_report_writer_preserves_unrelated_filesystem_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = Path(temp_dir) / "reports" / "report.json"
+            with patch.object(scan_skill.os, "mkdir", side_effect=PermissionError(13, "denied")):
+                with self.assertRaises(PermissionError):
+                    scan_skill.write_json_file(report, {"gate": "ALLOW"})
+
+    def test_summary_only_terminal_report_does_not_print_evidence(self) -> None:
+        output = io.StringIO()
+        finding = scan_skill.Finding(
+            "HIGH",
+            "credential-access",
+            "config.py",
+            4,
+            "Reads credentials",
+            "API_KEY=should-not-appear-in-ci-logs",
+            "Remove credential access.",
+        )
+        with redirect_stdout(output):
+            scan_skill.print_text_report(Path("/review/skill"), [finding], summary_only=True)
+        rendered = output.getvalue()
+        self.assertIn("Gate: BLOCK", rendered)
+        self.assertIn("credential-access at config.py:4", rendered)
+        self.assertNotIn("should-not-appear-in-ci-logs", rendered)
 
     def test_scans_and_hashes_node_modules_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -586,17 +877,7 @@ class SecurityRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             source = self.make_skill(temp / "source")
-            subprocess.run(["git", "init", "-q"], cwd=source, check=True)
-            subprocess.run(["git", "remote", "add", "origin", "https://github.com/owner/repo.git"], cwd=source, check=True)
-            subprocess.run(["git", "add", "."], cwd=source, check=True)
-            subprocess.run(
-                ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"],
-                cwd=source,
-                check=True,
-            )
-            commit = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=source, check=True, capture_output=True, text=True
-            ).stdout.strip()
+            commit = self.commit_repo(source)
             workspace = temp / "workspace"
             workspace.mkdir()
             staged = safe_install_skill.stage_directory_candidate(source, workspace)

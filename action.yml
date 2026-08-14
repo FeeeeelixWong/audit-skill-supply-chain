@@ -1,0 +1,155 @@
+name: Audit Agent Skill Supply Chain
+description: Scan an agent skill without executing it and emit JSON and SARIF security reports.
+author: FeeeeelixWong
+
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  target:
+    description: Skill directory to scan, relative to the checked-out repository or absolute.
+    required: false
+    default: .
+  source-url:
+    description: Approved canonical GitHub.com repository URL. Defaults to the current repository on GitHub.com.
+    required: false
+    default: ""
+  expected-commit:
+    description: Approved full 40-character Git commit SHA. Defaults to GITHUB_SHA.
+    required: false
+    default: ""
+  json-output:
+    description: JSON report path. Relative paths are resolved from GITHUB_WORKSPACE.
+    required: false
+    default: ""
+  sarif-output:
+    description: SARIF report path. Relative paths are resolved from GITHUB_WORKSPACE.
+    required: false
+    default: ""
+  fail-on:
+    description: "Gate threshold: block, quarantine, conditions, or never."
+    required: false
+    default: quarantine
+
+outputs:
+  gate:
+    description: Final gate decision.
+    value: ${{ steps.audit.outputs.gate }}
+  json:
+    description: Absolute path to the JSON report.
+    value: ${{ steps.audit.outputs.json }}
+  sarif:
+    description: Absolute path to the SARIF report.
+    value: ${{ steps.audit.outputs.sarif }}
+
+runs:
+  using: composite
+  steps:
+    - id: audit
+      name: Scan skill without execution
+      shell: bash
+      env:
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_SOURCE_URL: ${{ inputs.source-url }}
+        INPUT_EXPECTED_COMMIT: ${{ inputs.expected-commit }}
+        INPUT_JSON_OUTPUT: ${{ inputs.json-output }}
+        INPUT_SARIF_OUTPUT: ${{ inputs.sarif-output }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        set -euo pipefail
+
+        reject_multiline() {
+          local name="$1"
+          local value="$2"
+          if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+            echo "error: $name must not contain newline characters" >&2
+            exit 1
+          fi
+        }
+        reject_multiline target "$INPUT_TARGET"
+        reject_multiline source-url "$INPUT_SOURCE_URL"
+        reject_multiline expected-commit "$INPUT_EXPECTED_COMMIT"
+        reject_multiline json-output "$INPUT_JSON_OUTPUT"
+        reject_multiline sarif-output "$INPUT_SARIF_OUTPUT"
+        reject_multiline fail-on "$INPUT_FAIL_ON"
+
+        target="$INPUT_TARGET"
+        if [[ "$target" != /* ]]; then
+          target="$GITHUB_WORKSPACE/$target"
+        fi
+
+        report_root="${RUNNER_TEMP:?}/audit-skill-supply-chain"
+        mkdir -p "$report_root"
+        chmod 700 "$report_root"
+        report_dir="$(mktemp -d "$report_root/report.XXXXXX")"
+
+        resolve_output() {
+          local configured="$1"
+          local fallback="$2"
+          if [[ -z "$configured" ]]; then
+            printf '%s\n' "$fallback"
+          elif [[ "$configured" = /* ]]; then
+            printf '%s\n' "$configured"
+          else
+            printf '%s\n' "$GITHUB_WORKSPACE/$configured"
+          fi
+        }
+
+        json_output="$(resolve_output "$INPUT_JSON_OUTPUT" "$report_dir/report.json")"
+        sarif_output="$(resolve_output "$INPUT_SARIF_OUTPUT" "$report_dir/report.sarif")"
+
+        source_url="$INPUT_SOURCE_URL"
+        if [[ -z "$source_url" && "${GITHUB_SERVER_URL:-}" == "https://github.com" ]]; then
+          source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+        fi
+        expected_commit="${INPUT_EXPECTED_COMMIT:-${GITHUB_SHA:-}}"
+
+        args=(
+          "$target"
+          --json-output "$json_output"
+          --sarif-output "$sarif_output"
+          --summary-only
+        )
+        if [[ -n "$source_url" ]]; then
+          args+=(--source-url "$source_url")
+        fi
+        if [[ -n "$expected_commit" ]]; then
+          args+=(--expected-commit "$expected_commit")
+        fi
+
+        case "$INPUT_FAIL_ON" in
+          block)
+            args+=(--fail-on high)
+            ;;
+          quarantine)
+            args+=(--fail-on medium)
+            ;;
+          conditions)
+            args+=(--fail-on low)
+            ;;
+          never)
+            ;;
+          *)
+            echo "error: fail-on must be block, quarantine, conditions, or never" >&2
+            exit 1
+            ;;
+        esac
+
+        set +e
+        python3 -I "$GITHUB_ACTION_PATH/skills/audit-skill-supply-chain/scripts/scan_skill.py" "${args[@]}"
+        scan_status=$?
+        set -e
+        if [[ "$scan_status" -ne 0 && "$scan_status" -ne 2 ]]; then
+          exit "$scan_status"
+        fi
+
+        gate="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["gate"])' "$json_output")"
+        printf 'gate=%s\n' "$gate" >> "$GITHUB_OUTPUT"
+        printf 'json=%s\n' "$json_output" >> "$GITHUB_OUTPUT"
+        printf 'sarif=%s\n' "$sarif_output" >> "$GITHUB_OUTPUT"
+
+        if [[ "$scan_status" -eq 2 ]]; then
+          echo "::error title=Agent skill audit gate::$gate. Review the JSON or SARIF report before installation."
+          exit 2
+        fi

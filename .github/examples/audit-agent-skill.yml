@@ -1,0 +1,38 @@
+name: Audit agent skill
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Audit agent skill
+        id: skill-audit
+        uses: FeeeeelixWong/audit-skill-supply-chain@aa5ca43ea51b0483fd5f73fcbb38a3db8663d3ad
+        with:
+          target: path/to/skill
+          fail-on: quarantine
+      - name: Retain detailed JSON evidence
+        if: ${{ always() && steps.skill-audit.outputs.json != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v7.0.1
+        with:
+          name: agent-skill-audit-json-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.skill-audit.outputs.json }}
+          if-no-files-found: error
+          retention-days: 3
+      - name: Upload SARIF to GitHub code scanning
+        if: ${{ always() && steps.skill-audit.outputs.sarif != '' && github.event.pull_request.head.repo.fork != true }}
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
+        with:
+          sarif_file: ${{ steps.skill-audit.outputs.sarif }}

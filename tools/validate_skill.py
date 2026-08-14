@@ -61,6 +61,8 @@ def main() -> int:
         SKILL / "scripts" / "audit_skill.py",
         ROOT / "tools" / "install_skill.py",
         ROOT / "tools" / "create_cli_adapter.py",
+        ROOT / "action.yml",
+        ROOT / "docs" / "github-action.md",
     ]
     for path in required:
         if not path.exists():
@@ -70,6 +72,18 @@ def main() -> int:
         py_compile.compile(str(script), doraise=True)
     py_compile.compile(str(ROOT / "tools" / "install_skill.py"), doraise=True)
     py_compile.compile(str(ROOT / "tools" / "create_cli_adapter.py"), doraise=True)
+
+    action = (ROOT / "action.yml").read_text(encoding="utf-8")
+    for fragment in (
+        "using: composite",
+        "python3 -I",
+        "--json-output",
+        "--sarif-output",
+        "--summary-only",
+        "INPUT_FAIL_ON",
+    ):
+        if fragment not in action:
+            fail(f"action.yml is missing required fragment: {fragment}")
     print("Skill package is valid.")
     return 0
 

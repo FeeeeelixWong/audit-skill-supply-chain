@@ -9,19 +9,26 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import errno
 import hashlib
 import json
 import os
 import re
+import secrets
 import stat
+import subprocess
 import sys
+import tempfile
+import unicodedata
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 
 SEVERITY_ORDER = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
+PROJECT_URL = "https://github.com/FeeeeelixWong/audit-skill-supply-chain"
 
 TEXT_SUFFIXES = {
     ".bash",
@@ -349,8 +356,21 @@ def parse_github_ref(value: str | None) -> tuple[str | None, str | None]:
     return f"{owner}/{repo}".lower(), ref
 
 
+def find_git_checkout(root: Path) -> Path | None:
+    for candidate in (root, *root.parents):
+        dot_git = candidate / ".git"
+        if dot_git.is_symlink():
+            return None
+        if dot_git.is_dir() or dot_git.is_file():
+            return candidate
+    return None
+
+
 def find_git_dir(root: Path) -> Path | None:
-    dot_git = root / ".git"
+    checkout = find_git_checkout(root)
+    if checkout is None:
+        return None
+    dot_git = checkout / ".git"
     if dot_git.is_dir():
         return dot_git
     if dot_git.is_file():
@@ -362,9 +382,76 @@ def find_git_dir(root: Path) -> Path | None:
             git_dir = content.split(":", 1)[1].strip()
             candidate = Path(git_dir)
             if not candidate.is_absolute():
-                candidate = (root / candidate).resolve()
+                candidate = (checkout / candidate).resolve()
             return candidate if candidate.exists() else None
     return None
+
+
+def run_readonly_git(checkout: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run a non-mutating Git query without inherited Git configuration."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_LITERAL_PATHSPECS": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    return subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-C",
+            str(checkout),
+            *arguments,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        env=environment,
+    )
+
+
+def verify_git_target_at_head(checkout: Path, root: Path) -> tuple[bool, str]:
+    """Confirm every scanned target file is tracked and unchanged at HEAD."""
+    try:
+        pathspec = root.relative_to(checkout).as_posix() or "."
+    except ValueError:
+        return False, "target is outside the discovered Git checkout"
+
+    try:
+        tracked = run_readonly_git(checkout, "ls-tree", "-r", "--name-only", "HEAD", "--", pathspec)
+        if tracked.returncode != 0:
+            return False, f"git ls-tree failed: {tracked.stderr.strip() or 'unknown error'}"
+        if not tracked.stdout.strip():
+            return False, f"target path is not tracked at HEAD: {pathspec}"
+
+        status = run_readonly_git(
+            checkout,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+            "--",
+            pathspec,
+        )
+        if status.returncode != 0:
+            return False, f"git status failed: {status.stderr.strip() or 'unknown error'}"
+        if status.stdout.strip():
+            return False, f"target differs from HEAD:\n{status.stdout.strip()[:2_000]}"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"could not verify target against Git index: {exc}"
+    return True, ""
 
 
 def read_origin_url(git_dir: Path) -> str | None:
@@ -551,6 +638,7 @@ def scan_provenance(root: Path, args: argparse.Namespace, findings: list[Finding
         else:
             integrity_verified = True
 
+    checkout = find_git_checkout(root)
     git_dir = find_git_dir(root)
     if git_dir:
         origin_url = read_origin_url(git_dir)
@@ -593,14 +681,36 @@ def scan_provenance(root: Path, args: argparse.Namespace, findings: list[Finding
                     "Use a normal Git checkout or verified release checksum before installation.",
                 )
             else:
-                integrity_verified = True
+                target_matches_head, target_evidence = (
+                    verify_git_target_at_head(checkout, root)
+                    if checkout is not None
+                    else (False, "could not locate the checkout work tree")
+                )
+                if target_matches_head:
+                    integrity_verified = True
+                else:
+                    add_provenance_finding(
+                        findings,
+                        "HIGH",
+                        "Target content is not tracked and clean at the approved commit",
+                        target_evidence,
+                        "Reject modified, untracked, or ignored content and scan a clean checkout of the approved commit.",
+                    )
         elif origin_slug:
             add_provenance_finding(
                 findings,
-                "MEDIUM",
-                "GitHub checkout is not pinned to a full commit SHA",
+                "INFO" if installed_baseline else "MEDIUM",
+                (
+                    "GitHub checkout provenance observed without a recorded commit pin"
+                    if installed_baseline
+                    else "GitHub checkout is not pinned to a full commit SHA"
+                ),
                 origin_url or origin_slug,
-                "Pin to a full 40-character commit SHA before promoting from quarantine.",
+                (
+                    "Record the reviewed commit during the next update or reinstall through the safe installer."
+                    if installed_baseline
+                    else "Pin to a full 40-character commit SHA before promoting from quarantine."
+                ),
             )
     else:
         if expected_commit:
@@ -910,11 +1020,232 @@ def decision_for_findings(findings: list[Finding], max_signals: int = 5) -> dict
     }
 
 
-def print_text_report(root: Path, findings: list[Finding]) -> None:
+def build_scan_report(root: Path, findings: list[Finding]) -> dict[str, object]:
+    return {
+        "target": str(root),
+        "gate": gate_for_findings(findings),
+        "summary": summarize(findings),
+        "decision": decision_for_findings(findings),
+        "findings": [asdict(finding) for finding in findings],
+    }
+
+
+def sanitize_report_text(value: object, limit: int = 2_000) -> str:
+    """Make untrusted evidence readable without control or invisible formatting characters."""
+    rendered: list[str] = []
+    rendered_length = 0
+    for character in str(value):
+        codepoint = ord(character)
+        if unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}:
+            part = f"\\u{codepoint:04x}" if codepoint <= 0xFFFF else f"\\U{codepoint:08x}"
+        else:
+            part = character
+        if rendered_length + len(part) > limit:
+            if limit - rendered_length >= 3:
+                rendered.append("...")
+            break
+        rendered.append(part)
+        rendered_length += len(part)
+    return "".join(rendered)
+
+
+def sarif_rule_id(finding: Finding) -> str:
+    category = re.sub(r"[^A-Za-z0-9_.-]+", "-", finding.category).strip("-") or "finding"
+    return f"AGENT-SKILL-{category.upper()}"[:120]
+
+
+def sarif_artifact_uri(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
+        return "."
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    if any(part == ".." for part in parts):
+        return "."
+    return quote("/".join(parts) or ".", safe="/._-")
+
+
+def sarif_location(prefix: str, finding: Finding) -> str:
+    finding_path = "SKILL.md" if finding.path == "." else finding.path
+    return "/".join(part for part in (prefix, finding_path) if part and part != ".") or "SKILL.md"
+
+
+def build_sarif_report(root: Path, findings: list[Finding]) -> dict[str, object]:
+    """Return SARIF 2.1.0 without exposing the scanner host's absolute target path."""
+    levels = {
+        "CRITICAL": "error",
+        "HIGH": "error",
+        "MEDIUM": "warning",
+        "LOW": "note",
+        "INFO": "note",
+    }
+    rules: dict[str, dict[str, object]] = {}
+    results: list[dict[str, object]] = []
+    gate = gate_for_findings(findings)
+    checkout = find_git_checkout(root)
+    prefix = ""
+    if checkout is not None:
+        try:
+            prefix = root.relative_to(checkout).as_posix()
+        except ValueError:
+            prefix = ""
+
+    for finding in sorted(
+        findings,
+        key=lambda item: (-SEVERITY_ORDER[item.severity], item.path, item.line or 0, item.category, item.title),
+    ):
+        rule_id = sarif_rule_id(finding)
+        rules.setdefault(
+            rule_id,
+            {
+                "id": rule_id,
+                "name": sanitize_report_text(finding.category, 120),
+                "shortDescription": {"text": sanitize_report_text(finding.title, 240)},
+                "fullDescription": {"text": sanitize_report_text(finding.recommendation)},
+                "helpUri": PROJECT_URL,
+                "properties": {"tags": ["security", "agent-skill", finding.category]},
+            },
+        )
+        physical_location: dict[str, object] = {
+            "artifactLocation": {"uri": sarif_artifact_uri(sarif_location(prefix, finding))}
+        }
+        if finding.line is not None and finding.line > 0:
+            physical_location["region"] = {"startLine": finding.line}
+        fingerprint = hashlib.sha256(
+            f"{finding.category}\0{finding.path}\0{finding.line or 0}\0{finding.title}".encode("utf-8")
+        ).hexdigest()
+        results.append(
+            {
+                "ruleId": rule_id,
+                "level": levels[finding.severity],
+                "message": {
+                    "text": sanitize_report_text(f"{finding.title}. {finding.recommendation}")
+                },
+                "locations": [{"physicalLocation": physical_location}],
+                "partialFingerprints": {"primaryLocationLineHash": fingerprint},
+                "properties": {
+                    "severity": finding.severity,
+                    "category": finding.category,
+                    "gate": gate,
+                },
+            }
+        )
+
+    return {
+        "$schema": SARIF_SCHEMA,
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "Audit Skill Supply Chain",
+                        "informationUri": PROJECT_URL,
+                        "rules": list(rules.values()),
+                    }
+                },
+                "columnKind": "utf16CodeUnits",
+                "automationDetails": {"id": "agent-skill-audit/"},
+                "results": results,
+                "invocations": [{"executionSuccessful": True}],
+                "properties": {"gate": gate, "summary": summarize(findings)},
+            }
+        ],
+    }
+
+
+def open_private_parent(path: Path) -> tuple[Path, int]:
+    """Open or create a report parent without following any symlink component."""
+    destination = path.expanduser().absolute()
+    temp_root = Path(tempfile.gettempdir()).expanduser().absolute()
+    try:
+        destination = temp_root.resolve(strict=True) / destination.relative_to(temp_root)
+    except (OSError, ValueError):
+        pass
+    if not destination.name:
+        raise ValueError("report destination must name a file")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(destination.anchor, flags)
+    try:
+        for component in destination.parent.parts[1:]:
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except OSError as exc:
+        os.close(descriptor)
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise ValueError(
+                f"refusing report path with a symlink or non-directory parent: {destination}"
+            ) from exc
+        raise
+    return destination, descriptor
+
+
+def write_json_file(path: Path, payload: object) -> Path:
+    """Atomically write a mode-0600 report without following symlink path components."""
+    destination, parent_descriptor = open_private_parent(path)
+    try:
+        try:
+            existing = os.stat(destination.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and stat.S_ISLNK(existing.st_mode):
+            raise ValueError(f"refusing to write report through symlink: {destination}")
+
+        temporary_name = ""
+        descriptor: int | None = None
+        for _ in range(100):
+            temporary_name = f".{destination.name}.{secrets.token_hex(12)}"
+            try:
+                descriptor = os.open(
+                    temporary_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    mode=0o600,
+                    dir_fd=parent_descriptor,
+                )
+                break
+            except FileExistsError:
+                continue
+        if descriptor is None:
+            raise OSError("could not allocate a private temporary report")
+
+        try:
+            handle = os.fdopen(descriptor, "w", encoding="utf-8")
+            descriptor = None
+            with handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(
+                temporary_name,
+                destination.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+        except Exception:
+            if descriptor is not None:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+            raise
+    finally:
+        try:
+            os.close(parent_descriptor)
+        except OSError:
+            pass
+    return destination
+
+
+def print_text_report(root: Path, findings: list[Finding], summary_only: bool = False) -> None:
     counts = summarize(findings)
     decision = decision_for_findings(findings)
 
-    print(f"Target: {root}")
+    print(f"Target: {sanitize_report_text(root)}")
     print(f"Gate: {decision['gate']}")
     print("Findings: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
     print(f"Decision: {decision['reason']}")
@@ -923,10 +1254,15 @@ def print_text_report(root: Path, findings: list[Finding]) -> None:
         print("Top signals:")
         for signal in decision["signals"]:
             print(
-                f"  - [{signal['severity']}] {signal['title']} "
-                f"({signal['category']} at {signal['location']})"
+                f"  - [{sanitize_report_text(signal['severity'], 40)}] "
+                f"{sanitize_report_text(signal['title'], 240)} "
+                f"({sanitize_report_text(signal['category'], 120)} at "
+                f"{sanitize_report_text(signal['location'], 500)})"
             )
     print()
+
+    if summary_only:
+        return
 
     if not findings:
         print("No static findings. Continue with manual provenance and intent review.")
@@ -934,11 +1270,11 @@ def print_text_report(root: Path, findings: list[Finding]) -> None:
 
     for finding in sorted(findings, key=lambda f: (-SEVERITY_ORDER[f.severity], f.path, f.line or 0)):
         loc = finding.path if finding.line is None else f"{finding.path}:{finding.line}"
-        print(f"[{finding.severity}] {finding.title}")
-        print(f"  Category: {finding.category}")
-        print(f"  Location: {loc}")
-        print(f"  Evidence: {finding.evidence}")
-        print(f"  Recommendation: {finding.recommendation}")
+        print(f"[{sanitize_report_text(finding.severity, 40)}] {sanitize_report_text(finding.title, 240)}")
+        print(f"  Category: {sanitize_report_text(finding.category, 120)}")
+        print(f"  Location: {sanitize_report_text(loc, 500)}")
+        print(f"  Evidence: {sanitize_report_text(finding.evidence)}")
+        print(f"  Recommendation: {sanitize_report_text(finding.recommendation)}")
         print()
 
 
@@ -946,6 +1282,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Static scanner for untrusted agent skill directories.")
     parser.add_argument("target", help="Path to the skill directory to scan")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+    parser.add_argument("--json-output", help="Write the structured JSON report to this path")
+    parser.add_argument("--sarif-output", help="Write a SARIF 2.1.0 report to this path")
+    parser.add_argument("--summary-only", action="store_true", help="Omit detailed evidence from terminal output")
     parser.add_argument("--max-bytes", type=int, default=512_000, help="Maximum bytes read from each text file")
     parser.add_argument("--source-url", help="Approved GitHub repository URL for provenance comparison")
     parser.add_argument("--expected-commit", help="Approved full 40-character Git commit SHA")
@@ -973,22 +1312,20 @@ def main() -> int:
     scan_structure(root, findings)
     scan_files(root, args.max_bytes, findings)
 
+    report = build_scan_report(root, findings)
+    try:
+        if args.json_output:
+            write_json_file(Path(args.json_output), report)
+        if args.sarif_output:
+            write_json_file(Path(args.sarif_output), build_sarif_report(root, findings))
+    except (OSError, ValueError) as exc:
+        print(f"error: could not write report: {exc}", file=sys.stderr)
+        return 1
+
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "target": str(root),
-                    "gate": gate_for_findings(findings),
-                    "summary": summarize(findings),
-                    "decision": decision_for_findings(findings),
-                    "findings": [asdict(finding) for finding in findings],
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        print(json.dumps(report, indent=2, sort_keys=True))
     else:
-        print_text_report(root, findings)
+        print_text_report(root, findings, summary_only=args.summary_only)
 
     if args.fail_on:
         threshold = SEVERITY_ORDER[args.fail_on.upper()]
