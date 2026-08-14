@@ -19,7 +19,7 @@ jobs:
           persist-credentials: false
       - name: Audit agent skill
         id: skill-audit
-        uses: FeeeeelixWong/audit-skill-supply-chain@7ec39b8496ef08b2aa778a91f723e6c4450915f9
+        uses: FeeeeelixWong/audit-skill-supply-chain@aa5ca43ea51b0483fd5f73fcbb38a3db8663d3ad
         with:
           target: path/to/skill
           fail-on: quarantine
