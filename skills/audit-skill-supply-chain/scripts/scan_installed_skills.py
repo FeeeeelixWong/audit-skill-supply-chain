@@ -76,7 +76,6 @@ def run_scan(skill_dir: Path, max_bytes: int) -> dict:
         installed_baseline=True,
     )
     try:
-        scan_skill.scan_provenance(skill_dir, args, findings)
         if skill_dir.resolve() == SCRIPT_DIR.parent.resolve():
             findings.append(
                 scan_skill.Finding(
@@ -90,6 +89,7 @@ def run_scan(skill_dir: Path, max_bytes: int) -> dict:
                 )
             )
         else:
+            scan_skill.scan_provenance(skill_dir, args, findings)
             scan_skill.scan_structure(skill_dir, findings)
             scan_skill.scan_files(skill_dir, max_bytes, findings)
     except Exception as exc:

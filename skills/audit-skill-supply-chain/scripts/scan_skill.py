@@ -15,13 +15,16 @@ import os
 import re
 import stat
 import sys
+import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 
 SEVERITY_ORDER = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
+PROJECT_URL = "https://github.com/FeeeeelixWong/audit-skill-supply-chain"
 
 TEXT_SUFFIXES = {
     ".bash",
@@ -349,8 +352,21 @@ def parse_github_ref(value: str | None) -> tuple[str | None, str | None]:
     return f"{owner}/{repo}".lower(), ref
 
 
+def find_git_checkout(root: Path) -> Path | None:
+    for candidate in (root, *root.parents):
+        dot_git = candidate / ".git"
+        if dot_git.is_symlink():
+            return None
+        if dot_git.is_dir() or dot_git.is_file():
+            return candidate
+    return None
+
+
 def find_git_dir(root: Path) -> Path | None:
-    dot_git = root / ".git"
+    checkout = find_git_checkout(root)
+    if checkout is None:
+        return None
+    dot_git = checkout / ".git"
     if dot_git.is_dir():
         return dot_git
     if dot_git.is_file():
@@ -362,7 +378,7 @@ def find_git_dir(root: Path) -> Path | None:
             git_dir = content.split(":", 1)[1].strip()
             candidate = Path(git_dir)
             if not candidate.is_absolute():
-                candidate = (root / candidate).resolve()
+                candidate = (checkout / candidate).resolve()
             return candidate if candidate.exists() else None
     return None
 
@@ -597,10 +613,18 @@ def scan_provenance(root: Path, args: argparse.Namespace, findings: list[Finding
         elif origin_slug:
             add_provenance_finding(
                 findings,
-                "MEDIUM",
-                "GitHub checkout is not pinned to a full commit SHA",
+                "INFO" if installed_baseline else "MEDIUM",
+                (
+                    "GitHub checkout provenance observed without a recorded commit pin"
+                    if installed_baseline
+                    else "GitHub checkout is not pinned to a full commit SHA"
+                ),
                 origin_url or origin_slug,
-                "Pin to a full 40-character commit SHA before promoting from quarantine.",
+                (
+                    "Record the reviewed commit during the next update or reinstall through the safe installer."
+                    if installed_baseline
+                    else "Pin to a full 40-character commit SHA before promoting from quarantine."
+                ),
             )
     else:
         if expected_commit:
@@ -910,11 +934,182 @@ def decision_for_findings(findings: list[Finding], max_signals: int = 5) -> dict
     }
 
 
-def print_text_report(root: Path, findings: list[Finding]) -> None:
+def build_scan_report(root: Path, findings: list[Finding]) -> dict[str, object]:
+    return {
+        "target": str(root),
+        "gate": gate_for_findings(findings),
+        "summary": summarize(findings),
+        "decision": decision_for_findings(findings),
+        "findings": [asdict(finding) for finding in findings],
+    }
+
+
+def sanitize_report_text(value: object, limit: int = 2_000) -> str:
+    """Make untrusted evidence readable without terminal or bidi control characters."""
+    bidi_controls = {
+        "\u061c",
+        "\u200e",
+        "\u200f",
+        "\u202a",
+        "\u202b",
+        "\u202c",
+        "\u202d",
+        "\u202e",
+        "\u2066",
+        "\u2067",
+        "\u2068",
+        "\u2069",
+    }
+    rendered: list[str] = []
+    rendered_length = 0
+    for character in str(value):
+        codepoint = ord(character)
+        if codepoint < 32 or codepoint == 127 or character in bidi_controls:
+            part = f"\\u{codepoint:04x}"
+        else:
+            part = character
+        rendered.append(part)
+        rendered_length += len(part)
+        if rendered_length >= limit:
+            break
+    text = "".join(rendered)
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def sarif_rule_id(finding: Finding) -> str:
+    category = re.sub(r"[^A-Za-z0-9_.-]+", "-", finding.category).strip("-") or "finding"
+    return f"AGENT-SKILL-{category.upper()}"[:120]
+
+
+def sarif_artifact_uri(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
+        return "."
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    if any(part == ".." for part in parts):
+        return "."
+    return quote("/".join(parts) or ".", safe="/._-")
+
+
+def sarif_location(root: Path, finding: Finding) -> str:
+    checkout = find_git_checkout(root)
+    prefix = ""
+    if checkout is not None:
+        try:
+            prefix = root.relative_to(checkout).as_posix()
+        except ValueError:
+            prefix = ""
+    finding_path = "SKILL.md" if finding.path == "." else finding.path
+    return "/".join(part for part in (prefix, finding_path) if part and part != ".") or "SKILL.md"
+
+
+def build_sarif_report(root: Path, findings: list[Finding]) -> dict[str, object]:
+    """Return SARIF 2.1.0 without exposing the scanner host's absolute target path."""
+    levels = {
+        "CRITICAL": "error",
+        "HIGH": "error",
+        "MEDIUM": "warning",
+        "LOW": "note",
+        "INFO": "note",
+    }
+    rules: dict[str, dict[str, object]] = {}
+    results: list[dict[str, object]] = []
+    gate = gate_for_findings(findings)
+
+    for finding in sorted(
+        findings,
+        key=lambda item: (-SEVERITY_ORDER[item.severity], item.path, item.line or 0, item.category, item.title),
+    ):
+        rule_id = sarif_rule_id(finding)
+        rules.setdefault(
+            rule_id,
+            {
+                "id": rule_id,
+                "name": sanitize_report_text(finding.category, 120),
+                "shortDescription": {"text": sanitize_report_text(finding.title, 240)},
+                "fullDescription": {"text": sanitize_report_text(finding.recommendation)},
+                "helpUri": PROJECT_URL,
+                "properties": {"tags": ["security", "agent-skill", finding.category]},
+            },
+        )
+        physical_location: dict[str, object] = {
+            "artifactLocation": {"uri": sarif_artifact_uri(sarif_location(root, finding)), "uriBaseId": "%SRCROOT%"}
+        }
+        if finding.line is not None and finding.line > 0:
+            physical_location["region"] = {"startLine": finding.line}
+        fingerprint = hashlib.sha256(
+            f"{finding.category}\0{finding.path}\0{finding.line or 0}\0{finding.title}".encode("utf-8")
+        ).hexdigest()
+        results.append(
+            {
+                "ruleId": rule_id,
+                "level": levels[finding.severity],
+                "message": {
+                    "text": sanitize_report_text(f"{finding.title}. {finding.recommendation}")
+                },
+                "locations": [{"physicalLocation": physical_location}],
+                "partialFingerprints": {"primaryLocationLineHash": fingerprint},
+                "properties": {
+                    "severity": finding.severity,
+                    "category": finding.category,
+                    "gate": gate,
+                    "evidence": sanitize_report_text(finding.evidence),
+                },
+            }
+        )
+
+    return {
+        "$schema": SARIF_SCHEMA,
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "Audit Skill Supply Chain",
+                        "informationUri": PROJECT_URL,
+                        "rules": list(rules.values()),
+                    }
+                },
+                "columnKind": "utf16CodeUnits",
+                "automationDetails": {"id": "agent-skill-audit/"},
+                "results": results,
+                "invocations": [{"executionSuccessful": True}],
+                "properties": {"gate": gate, "summary": summarize(findings)},
+            }
+        ],
+    }
+
+
+def write_json_file(path: Path, payload: object) -> Path:
+    """Atomically write a private report and refuse a symlink destination."""
+    destination = path.expanduser().absolute()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        raise ValueError(f"refusing to write report through symlink: {destination}")
+
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, destination)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        temporary.unlink(missing_ok=True)
+        raise
+    return destination
+
+
+def print_text_report(root: Path, findings: list[Finding], summary_only: bool = False) -> None:
     counts = summarize(findings)
     decision = decision_for_findings(findings)
 
-    print(f"Target: {root}")
+    print(f"Target: {sanitize_report_text(root)}")
     print(f"Gate: {decision['gate']}")
     print("Findings: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
     print(f"Decision: {decision['reason']}")
@@ -923,10 +1118,15 @@ def print_text_report(root: Path, findings: list[Finding]) -> None:
         print("Top signals:")
         for signal in decision["signals"]:
             print(
-                f"  - [{signal['severity']}] {signal['title']} "
-                f"({signal['category']} at {signal['location']})"
+                f"  - [{sanitize_report_text(signal['severity'], 40)}] "
+                f"{sanitize_report_text(signal['title'], 240)} "
+                f"({sanitize_report_text(signal['category'], 120)} at "
+                f"{sanitize_report_text(signal['location'], 500)})"
             )
     print()
+
+    if summary_only:
+        return
 
     if not findings:
         print("No static findings. Continue with manual provenance and intent review.")
@@ -934,11 +1134,11 @@ def print_text_report(root: Path, findings: list[Finding]) -> None:
 
     for finding in sorted(findings, key=lambda f: (-SEVERITY_ORDER[f.severity], f.path, f.line or 0)):
         loc = finding.path if finding.line is None else f"{finding.path}:{finding.line}"
-        print(f"[{finding.severity}] {finding.title}")
-        print(f"  Category: {finding.category}")
-        print(f"  Location: {loc}")
-        print(f"  Evidence: {finding.evidence}")
-        print(f"  Recommendation: {finding.recommendation}")
+        print(f"[{sanitize_report_text(finding.severity, 40)}] {sanitize_report_text(finding.title, 240)}")
+        print(f"  Category: {sanitize_report_text(finding.category, 120)}")
+        print(f"  Location: {sanitize_report_text(loc, 500)}")
+        print(f"  Evidence: {sanitize_report_text(finding.evidence)}")
+        print(f"  Recommendation: {sanitize_report_text(finding.recommendation)}")
         print()
 
 
@@ -946,6 +1146,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Static scanner for untrusted agent skill directories.")
     parser.add_argument("target", help="Path to the skill directory to scan")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+    parser.add_argument("--json-output", help="Write the structured JSON report to this path")
+    parser.add_argument("--sarif-output", help="Write a SARIF 2.1.0 report to this path")
+    parser.add_argument("--summary-only", action="store_true", help="Omit detailed evidence from terminal output")
     parser.add_argument("--max-bytes", type=int, default=512_000, help="Maximum bytes read from each text file")
     parser.add_argument("--source-url", help="Approved GitHub repository URL for provenance comparison")
     parser.add_argument("--expected-commit", help="Approved full 40-character Git commit SHA")
@@ -973,22 +1176,20 @@ def main() -> int:
     scan_structure(root, findings)
     scan_files(root, args.max_bytes, findings)
 
+    report = build_scan_report(root, findings)
+    try:
+        if args.json_output:
+            write_json_file(Path(args.json_output), report)
+        if args.sarif_output:
+            write_json_file(Path(args.sarif_output), build_sarif_report(root, findings))
+    except (OSError, ValueError) as exc:
+        print(f"error: could not write report: {exc}", file=sys.stderr)
+        return 1
+
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "target": str(root),
-                    "gate": gate_for_findings(findings),
-                    "summary": summarize(findings),
-                    "decision": decision_for_findings(findings),
-                    "findings": [asdict(finding) for finding in findings],
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        print(json.dumps(report, indent=2, sort_keys=True))
     else:
-        print_text_report(root, findings)
+        print_text_report(root, findings, summary_only=args.summary_only)
 
     if args.fail_on:
         threshold = SEVERITY_ORDER[args.fail_on.upper()]

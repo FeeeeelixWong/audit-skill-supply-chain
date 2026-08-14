@@ -199,6 +199,133 @@ class SecurityRegressionTests(unittest.TestCase):
         self.assertEqual(result["decision"]["gate"], "ALLOW")
         self.assertIn("No static findings", result["decision"]["reason"])
 
+    def test_sarif_report_maps_findings_without_exposing_absolute_target(self) -> None:
+        finding = scan_skill.Finding(
+            "HIGH",
+            "code-execution",
+            "scripts/setup file.py",
+            8,
+            "Uses dynamic code execution",
+            "os.system('unsafe')\n\u202e",
+            "Replace dynamic execution with a structured API.",
+        )
+        sarif = scan_skill.build_sarif_report(Path("/isolated/skill"), [finding])
+        serialized = json.dumps(sarif)
+        run = sarif["runs"][0]
+        result = run["results"][0]
+
+        self.assertEqual(sarif["version"], "2.1.0")
+        self.assertEqual(run["properties"]["gate"], "BLOCK")
+        self.assertEqual(result["level"], "error")
+        self.assertEqual(
+            result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "scripts/setup%20file.py",
+        )
+        self.assertEqual(result["locations"][0]["physicalLocation"]["region"]["startLine"], 8)
+        self.assertIn("\\\\u000a", serialized)
+        self.assertIn("\\\\u202e", serialized)
+        self.assertNotIn(str(Path.cwd().resolve()), serialized)
+
+    def test_nested_skill_uses_parent_checkout_for_provenance_and_sarif_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            skill = self.make_skill(repo / "skills" / "example")
+            git_dir = repo / ".git"
+            git_dir.mkdir()
+            commit = "a" * 40
+            (git_dir / "HEAD").write_text(commit + "\n", encoding="utf-8")
+            (git_dir / "config").write_text(
+                '[remote "origin"]\n\turl = https://github.com/owner/repo.git\n',
+                encoding="utf-8",
+            )
+            findings: list[scan_skill.Finding] = []
+            scan_skill.scan_provenance(
+                skill,
+                Namespace(
+                    source_url="https://github.com/owner/repo",
+                    expected_commit=commit,
+                    artifact=None,
+                    expected_sha256=None,
+                    installed_baseline=False,
+                    artifact_bound=False,
+                ),
+                findings,
+            )
+            sarif = scan_skill.build_sarif_report(
+                skill,
+                [scan_skill.Finding("HIGH", "code-execution", "scripts/tool.py", 3, "Test", "exec", "Remove it.")],
+            )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(
+            sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "skills/example/scripts/tool.py",
+        )
+
+    def test_cli_writes_json_and_sarif_before_enforcing_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = self.make_skill(temp / "skill")
+            (root / "tool.py").write_text("import os\nos.system('unsafe')\n", encoding="utf-8")
+            json_report = temp / "reports" / "result.json"
+            sarif_report = temp / "reports" / "result.sarif"
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "scan_skill.py",
+                    str(root),
+                    "--expected-sha256",
+                    scan_skill.sha256_tree(root),
+                    "--json-output",
+                    str(json_report),
+                    "--sarif-output",
+                    str(sarif_report),
+                    "--fail-on",
+                    "high",
+                ],
+            ), redirect_stdout(io.StringIO()):
+                exit_code = scan_skill.main()
+
+            json_result = json.loads(json_report.read_text(encoding="utf-8"))
+            sarif_result = json.loads(sarif_report.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(json_result["gate"], "BLOCK")
+        self.assertEqual(sarif_result["runs"][0]["properties"]["gate"], "BLOCK")
+
+    def test_report_writer_rejects_symlink_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            protected = temp / "protected.json"
+            protected.write_text('{"unchanged": true}\n', encoding="utf-8")
+            report = temp / "report.json"
+            try:
+                os.symlink(protected, report)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                scan_skill.write_json_file(report, {"changed": True})
+            self.assertEqual(protected.read_text(encoding="utf-8"), '{"unchanged": true}\n')
+
+    def test_summary_only_terminal_report_does_not_print_evidence(self) -> None:
+        output = io.StringIO()
+        finding = scan_skill.Finding(
+            "HIGH",
+            "credential-access",
+            "config.py",
+            4,
+            "Reads credentials",
+            "API_KEY=should-not-appear-in-ci-logs",
+            "Remove credential access.",
+        )
+        with redirect_stdout(output):
+            scan_skill.print_text_report(Path("/review/skill"), [finding], summary_only=True)
+        rendered = output.getvalue()
+        self.assertIn("Gate: BLOCK", rendered)
+        self.assertIn("credential-access at config.py:4", rendered)
+        self.assertNotIn("should-not-appear-in-ci-logs", rendered)
+
     def test_scans_and_hashes_node_modules_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = self.make_skill(Path(temp_dir) / "skill")

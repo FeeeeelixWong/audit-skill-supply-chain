@@ -20,4 +20,19 @@ jobs:
       - run: python3 tools/create_cli_adapter.py --target all --dry-run
       - run: python3 skills/audit-skill-supply-chain/scripts/scan_installed_skills.py --path skills --fail-on critical
       - run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - name: Smoke-test reusable Action
+        id: action-smoke
+        uses: ./
+        with:
+          target: tests/fixtures/clean-skill
+          fail-on: quarantine
+      - name: Verify reusable Action outputs
+        env:
+          AUDIT_GATE: ${{ steps.action-smoke.outputs.gate }}
+          JSON_REPORT: ${{ steps.action-smoke.outputs.json }}
+          SARIF_REPORT: ${{ steps.action-smoke.outputs.sarif }}
+        run: |
+          test "$AUDIT_GATE" = "ALLOW"
+          test -s "$JSON_REPORT"
+          test -s "$SARIF_REPORT"
       - run: python3 tools/package_release.py --version 0.0.0-ci

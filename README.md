@@ -33,6 +33,7 @@ An untrusted skill stays isolated while its provenance, content, privacy behavio
 - **Privacy-first**: flag access to local files, secrets, browser data, email, cloud drives, private repositories, and connector data.
 - **Asset-loss focused**: block wallet seed/private-key handling, signing flows, transfers, withdrawals, payout changes, refunds, and payment-provider abuse.
 - **Agent-injection aware**: detect prompt-injection language that tries to override user, system, or safety instructions.
+- **GitHub-native gate**: run the scanner as a reusable Action and surface findings in GitHub code scanning through SARIF.
 - **No target execution**: the scanner treats the target skill as data and never runs its bundled scripts.
 - **Staged promotion**: safe install scans a private staging copy, rejects symlinks and oversized files, then promotes only that reviewed copy.
 
@@ -62,6 +63,17 @@ Top signals:
 ```
 
 Use `--json` when the result will feed CI or another tool. The JSON result includes the same `decision.reason`, `decision.recommended_action`, and highest-priority `decision.signals`, so automation can explain a failure without parsing terminal text.
+
+Write JSON and SARIF reports without changing terminal output:
+
+```bash
+python3 skills/audit-skill-supply-chain/scripts/audit_skill.py scan /path/to/untrusted-skill \
+  --json-output /tmp/agent-skill-audit.json \
+  --sarif-output /tmp/agent-skill-audit.sarif \
+  --fail-on medium
+```
+
+The repository also ships a reusable GitHub Action. Pin it to a reviewed full commit SHA, point `target` at the skill directory, and upload its `sarif` output to GitHub code scanning. The default `fail-on: quarantine` fails `BLOCK` and `QUARANTINE` decisions while preserving both reports. See the [GitHub Action security gate guide](docs/github-action.md) and [copyable workflow](.github/examples/audit-agent-skill.yml).
 
 Scan a GitHub-sourced skill with provenance checks:
 
@@ -191,6 +203,9 @@ This can create or update `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.github/copilo
 
 ```text
 .
+├── action.yml                            # Reusable GitHub Action security gate
+├── .github/examples/                    # Copyable downstream workflow
+├── docs/github-action.md                # GitHub Action and SARIF integration guide
 ├── skills/audit-skill-supply-chain/     # Installable agent skill
 │   ├── SKILL.md                         # Agent workflow
 │   ├── agents/openai.yaml               # UI metadata
@@ -235,6 +250,7 @@ This repository layers several independent checks around pull requests and ongoi
 - **Dependabot** opens weekly pull requests for GitHub Actions updates.
 - **OpenSSF Scorecard** evaluates repository-level supply-chain practices weekly and uploads findings to GitHub code scanning.
 - **zizmor** reviews GitHub Actions definitions with a security-focused static analysis and uploads high-confidence findings to GitHub code scanning.
+- **Reusable security gate** lets downstream skill repositories run the same scanner on every pull request and upload repository-relative SARIF findings to GitHub code scanning.
 
 These services provide review evidence, not a safety guarantee and not an automatic merge decision. CodeRabbit requires third-party GitHub App permissions for code, commit statuses, issues, and pull requests; a repository owner must review those permissions and explicitly approve the installation. Then choose **Only select repositories** and select this repository only. See the [CodeRabbit GitHub integration guide](https://docs.coderabbit.ai/platforms/github-com).
 
@@ -258,6 +274,7 @@ Agent skill 不只是普通文档。它可能会成为 agent 的操作说明，�
 - **隐私优先**：标记本地文件、密钥、浏览器数据、邮箱、云盘、私有仓库和连接器数据访问风险。
 - **防财产损失**：阻断钱包助记词/私钥处理、签名流程、转账、提现、收款地址变更、退款和支付服务滥用。
 - **识别 prompt injection**：检测试图覆盖用户、系统或安全指令的恶意提示词。
+- **GitHub 原生闸门**：可作为复用型 Action 运行，并通过 SARIF 把发现展示到 GitHub code scanning。
 - **不执行目标代码**：扫描器把目标 skill 当成数据处理，不运行目标 skill 自带脚本。
 - **私有暂存提升**：安全安装器先审计私有暂存副本，拒绝符号链接和超出审查上限的文件，只提升已审查副本。
 
@@ -287,6 +304,17 @@ Top signals:
 ```
 
 需要接入 CI 或其他工具时使用 `--json`。JSON 会提供同样的 `decision.reason`、`decision.recommended_action` 和最高优先级的 `decision.signals`，无需再解析终端文本。
+
+在不改变终端输出的情况下写入 JSON 与 SARIF 报告：
+
+```bash
+python3 skills/audit-skill-supply-chain/scripts/audit_skill.py scan /path/to/untrusted-skill \
+  --json-output /tmp/agent-skill-audit.json \
+  --sarif-output /tmp/agent-skill-audit.sarif \
+  --fail-on medium
+```
+
+本仓库还提供可复用的 GitHub Action。接入时应固定到已审查的完整 commit SHA，把 `target` 指向实际 skill 目录，并将 `sarif` 输出上传到 GitHub code scanning。默认 `fail-on: quarantine` 会在结果为 `BLOCK` 或 `QUARANTINE` 时失败，同时保留两种报告。具体参见 [GitHub Action 安全闸门指南](docs/github-action.md) 和 [可复制 workflow](.github/examples/audit-agent-skill.yml)。
 
 扫描来自 GitHub 的 skill，并检查来源：
 
@@ -416,6 +444,9 @@ python3 tools/create_cli_adapter.py --project /path/to/project --target all
 
 ```text
 .
+├── action.yml                            # 可复用 GitHub Action 安全闸门
+├── .github/examples/                    # 可复制的下游 workflow
+├── docs/github-action.md                # GitHub Action 与 SARIF 接入指南
 ├── skills/audit-skill-supply-chain/     # 可安装的 agent skill
 │   ├── SKILL.md                         # Agent 审查流程
 │   ├── agents/openai.yaml               # UI 元数据
@@ -460,6 +491,7 @@ python3 tools/create_cli_adapter.py --project /path/to/project --target all
 - **Dependabot**：每周为 GitHub Actions 依赖创建更新 PR。
 - **OpenSSF Scorecard**：每周评估仓库层面的供应链安全实践，并把发现上传至 GitHub code scanning。
 - **zizmor**：以安全导向的静态分析检查 GitHub Actions 定义，并把高可信度发现上传到 GitHub code scanning。
+- **复用型安全闸门**：让下游 skill 仓库在每个 PR 运行同一套扫描器，并将仓库相对路径的 SARIF 发现上传到 GitHub code scanning。
 
 这些服务提供审查证据，不是安全保证，也不会自动合并。CodeRabbit 需要第三方 GitHub App 对代码、提交状态、Issue 和 PR 的权限；仓库所有者必须先审阅这些权限并显式批准安装。随后请选择 **Only select repositories**，并且只授权当前仓库。接入步骤见 [CodeRabbit GitHub 集成指南](https://docs.coderabbit.ai/platforms/github-com)。
 
