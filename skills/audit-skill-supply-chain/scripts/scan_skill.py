@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import errno
 import hashlib
 import json
 import os
@@ -393,6 +394,7 @@ def run_readonly_git(checkout: Path, *arguments: str) -> subprocess.CompletedPro
         {
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_LITERAL_PATHSPECS": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_TERMINAL_PROMPT": "0",
         }
@@ -439,6 +441,7 @@ def verify_git_target_at_head(checkout: Path, root: Path) -> tuple[bool, str]:
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
+            "--ignored=matching",
             "--",
             pathspec,
         )
@@ -1172,7 +1175,11 @@ def open_private_parent(path: Path) -> tuple[Path, int]:
             descriptor = next_descriptor
     except OSError as exc:
         os.close(descriptor)
-        raise ValueError(f"refusing report path with a symlink or non-directory parent: {destination}") from exc
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise ValueError(
+                f"refusing report path with a symlink or non-directory parent: {destination}"
+            ) from exc
+        raise
     return destination, descriptor
 
 

@@ -72,6 +72,7 @@ chmod 700 "$report_dir"
 python3 skills/audit-skill-supply-chain/scripts/audit_skill.py scan /path/to/untrusted-skill \
   --json-output "$report_dir/report.json" \
   --sarif-output "$report_dir/report.sarif" \
+  --summary-only \
   --fail-on medium
 ```
 
@@ -315,6 +316,7 @@ chmod 700 "$report_dir"
 python3 skills/audit-skill-supply-chain/scripts/audit_skill.py scan /path/to/untrusted-skill \
   --json-output "$report_dir/report.json" \
   --sarif-output "$report_dir/report.sarif" \
+  --summary-only \
   --fail-on medium
 ```
 

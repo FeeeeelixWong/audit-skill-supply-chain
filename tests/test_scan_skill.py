@@ -40,17 +40,34 @@ class SecurityRegressionTests(unittest.TestCase):
         return root
 
     def commit_repo(self, root: Path, remote: str = "https://github.com/owner/repo.git") -> str:
-        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-        subprocess.run(["git", "remote", "add", "origin", remote], cwd=root, check=True)
-        subprocess.run(["git", "add", "."], cwd=root, check=True)
-        subprocess.run(
-            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"],
-            cwd=root,
-            check=True,
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        environment.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+
+        def git(*arguments: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *arguments],
+                cwd=root,
+                check=True,
+                env=environment,
+                capture_output=capture,
+                text=True,
+            )
+
+        git("init", "-q")
+        git("remote", "add", "origin", remote)
+        git("add", ".")
+        git(
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "fixture",
         )
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
-        ).stdout.strip()
+        return git("rev-parse", "HEAD", capture=True).stdout.strip()
 
     def scan(self, root: Path, max_bytes: int = 512_000) -> list[scan_skill.Finding]:
         findings: list[scan_skill.Finding] = []
@@ -331,6 +348,55 @@ class SecurityRegressionTests(unittest.TestCase):
             findings,
         )
 
+    def test_git_pathspec_magic_in_target_name_cannot_bypass_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            self.make_skill(repo / "skills" / "approved")
+            commit = self.commit_repo(repo)
+            skill = self.make_skill(repo / ":(top)skills" / "approved")
+            findings: list[scan_skill.Finding] = []
+            scan_skill.scan_provenance(
+                skill,
+                Namespace(
+                    source_url="https://github.com/owner/repo",
+                    expected_commit=commit,
+                    artifact=None,
+                    expected_sha256=None,
+                    installed_baseline=False,
+                    artifact_bound=False,
+                ),
+                findings,
+            )
+        self.assertTrue(
+            any(f.title == "Target content is not tracked and clean at the approved commit" for f in findings),
+            findings,
+        )
+
+    def test_ignored_file_inside_target_blocks_commit_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            skill = self.make_skill(repo / "skills" / "example")
+            (repo / ".gitignore").write_text("secret.py\n", encoding="utf-8")
+            commit = self.commit_repo(repo)
+            (skill / "secret.py").write_text("ignored payload\n", encoding="utf-8")
+            findings: list[scan_skill.Finding] = []
+            scan_skill.scan_provenance(
+                skill,
+                Namespace(
+                    source_url="https://github.com/owner/repo",
+                    expected_commit=commit,
+                    artifact=None,
+                    expected_sha256=None,
+                    installed_baseline=False,
+                    artifact_bound=False,
+                ),
+                findings,
+            )
+        self.assertTrue(
+            any(f.title == "Target content is not tracked and clean at the approved commit" for f in findings),
+            findings,
+        )
+
     def test_cli_writes_json_and_sarif_before_enforcing_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -398,6 +464,13 @@ class SecurityRegressionTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "replace failed"):
                     scan_skill.write_json_file(report, {"gate": "ALLOW"})
             self.assertEqual(list(report.parent.glob(".report.json.*")), [])
+
+    def test_report_writer_preserves_unrelated_filesystem_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = Path(temp_dir) / "reports" / "report.json"
+            with patch.object(scan_skill.os, "mkdir", side_effect=PermissionError(13, "denied")):
+                with self.assertRaises(PermissionError):
+                    scan_skill.write_json_file(report, {"gate": "ALLOW"})
 
     def test_summary_only_terminal_report_does_not_print_evidence(self) -> None:
         output = io.StringIO()
@@ -804,17 +877,7 @@ class SecurityRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             source = self.make_skill(temp / "source")
-            subprocess.run(["git", "init", "-q"], cwd=source, check=True)
-            subprocess.run(["git", "remote", "add", "origin", "https://github.com/owner/repo.git"], cwd=source, check=True)
-            subprocess.run(["git", "add", "."], cwd=source, check=True)
-            subprocess.run(
-                ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"],
-                cwd=source,
-                check=True,
-            )
-            commit = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=source, check=True, capture_output=True, text=True
-            ).stdout.strip()
+            commit = self.commit_repo(source)
             workspace = temp / "workspace"
             workspace.mkdir()
             staged = safe_install_skill.stage_directory_candidate(source, workspace)
